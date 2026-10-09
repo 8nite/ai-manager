@@ -202,7 +202,8 @@ function renderWorkspaces() {
 
 function renderSessionBar() {
   const s = state.sessions.find((x) => x.id === state.activeSessionId);
-  $("sessionTitle").textContent = s ? (s.title || s.id) : "No session selected";
+  $("sessionBar").classList.toggle("is-empty", !s);
+  $("sessionTitle").textContent = s ? (s.title || s.id) : "Nothing open — pick a session on the left";
   $("sessionMeta").textContent = s
     ? `${s.harness} · ${s.mode} · ${s.activity || s.status || "?"}${s.idleMs ? " · " + fmtIdle(s.idleMs) : ""}`
     : "";
@@ -320,6 +321,7 @@ function attachMainTerm(sessionId) {
 function renderConsoles() {
   const el = $("conTabs");
   el.innerHTML = "";
+  $("bottom").classList.toggle("body-empty", state.consoles.length === 0);
   for (const c of state.consoles) {
     const t = document.createElement("span");
     t.className = "con-tab" + (c.id === state.activeConsoleId ? " active" : "");
@@ -459,6 +461,9 @@ $("btnCollapse").onclick = () => {
   b.classList.toggle("collapsed");
   $("btnCollapse").textContent = b.classList.contains("collapsed") ? "▴" : "▾";
 };
+
+$("btnPalette").onclick = () => (pal.open ? closePal() : openPal());
+$("btnEmptyOpen").onclick = () => $("btnOpenFolder").click();
 
 // ---------- quick-switcher palette (ctrl/cmd+k) ----------
 

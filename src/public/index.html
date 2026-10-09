@@ -3,16 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="AI Manager — local multi-harness session manager for opencode, droid and deepseek-harness.">
+<meta name="theme-color" content="#0b0e1a">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e1a'/%3E%3Cpath d='M16 5 27 16 16 27 5 16Z' fill='none' stroke='%232dd4bf' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%232dd4bf'/%3E%3C/svg%3E">
 <title>AI Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body>
 <div id="app">
   <header id="topbar">
-    <div class="logo">◈ AI·MANAGER</div>
+    <div class="logo"><span class="mark">◈</span> AI Manager</div>
     <div class="top-actions">
-      <button id="btnOpenFolder" title="Open a folder as a workspace">＋ Open folder</button>
+      <button id="btnPalette" title="Quick switcher (Ctrl+K)"><span class="kbd">⌃K</span></button>
+      <button id="btnOpenFolder" class="primary" title="Open a folder as a workspace">＋ Open folder</button>
       <span id="healthDot" class="dot" title="server health"></span>
     </div>
   </header>
@@ -35,9 +42,14 @@
         <iframe id="webview" class="hidden" title="harness"></iframe>
         <div id="termWrap" class="hidden"></div>
         <div id="emptyStage">
-          <div class="ghost">◈</div>
-          <p>Select a session on the left — or open a folder and press <b>+</b> to create one.</p>
-          <p class="dim">harnesses: opencode · droid · dsh (deepseek-harness)</p>
+          <div class="start-card">
+            <div class="start-mark">◈</div>
+            <h2>Open a folder to begin</h2>
+            <p>Each folder becomes a workspace. Inside it, spin up <b>opencode</b>, <b>droid</b> or <b>dsh</b> sessions and flip between them here.</p>
+            <button id="btnEmptyOpen" class="primary lg">＋ Open folder</button>
+            <div class="chips"><span>opencode · web</span><span>droid · terminal</span><span>dsh · web</span></div>
+            <p class="hints">Ctrl+K jumps anywhere · + on a workspace starts a session</p>
+          </div>
         </div>
       </div>
     </main>
