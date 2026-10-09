@@ -37,10 +37,11 @@ function spawn(key, file, args, opts = {}) {
     cwd: opts.cwd,
     env: { ...process.env, ...(opts.env || {}), TERM: "xterm-256color" },
   });
-  const entry = { proc, backlog: "", subs: new Set(), exited: false, exitCode: null, key };
+  const entry = { proc, backlog: "", subs: new Set(), exited: false, exitCode: null, key, lastOutputAt: Date.now() };
   pool.set(key, entry);
   proc.onData((data) => {
     entry.backlog += data;
+    entry.lastOutputAt = Date.now();
     if (entry.backlog.length > CAP) entry.backlog = entry.backlog.slice(-CAP);
     for (const res of [...entry.subs]) {
       try {
@@ -64,6 +65,13 @@ function spawn(key, file, args, opts = {}) {
 
 function get(key) {
   return pool.get(key) || null;
+}
+
+// Snapshot for attention/activity reporting. Null when no PTY exists.
+function info(key) {
+  const e = pool.get(key);
+  if (!e) return null;
+  return { exited: e.exited, exitCode: e.exitCode, lastOutputAt: e.lastOutputAt };
 }
 
 function ensure(key, file, args, opts) {
@@ -123,4 +131,4 @@ function attachSse(key, res) {
   return true;
 }
 
-module.exports = { spawn, get, ensure, write, resize, kill, attachSse, shellForPlatform };
+module.exports = { spawn, get, info, ensure, write, resize, kill, attachSse, shellForPlatform };

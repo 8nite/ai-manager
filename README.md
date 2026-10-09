@@ -3,7 +3,10 @@
 Local multi-harness AI session manager with a futuristic web UI.
 
 - **Left panel** — workspaces (each = an opened folder) grouping sessions.
-  Each workspace group has a **+** button to create new sessions.
+  Each workspace group has a **+** button to create new sessions and a **×**
+  to remove the workspace. Quiet terminal sessions surface in a
+  **NEEDS YOU** shelf at the top. **Ctrl+K** opens a quick-switcher
+  (sessions, workspaces, actions).
 - **Main window** — the active harness session. Clicking a session in the
   left panel switches (or resumes) it here.
 - **Bottom panel** — consoles (shell in the workspace dir). More panel
@@ -89,6 +92,20 @@ loginctl enable-linger $USER   # keep running after logout
 
 `ai-manager-tunnel.service` requires `ai-manager.service`; both restart
 automatically. Logs: `journalctl --user -u ai-manager.service`.
+
+## Attention states
+
+PTY sessions (droid, consoles) report live activity in `/api/state`:
+
+| activity | meaning |
+|---|---|
+| `working` | terminal output within the last 8s — likely generating |
+| `waiting` | quiet longer — likely needs your input (amber pulse + NEEDS YOU shelf) |
+| `finished` | PTY exited |
+
+Web sessions (opencode/dsh) report process status only (`running`,
+`starting`, `error`, `finished`) — the manager can't see inside their
+iframes.
 
 ## API (v0.1)
 

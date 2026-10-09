@@ -68,9 +68,53 @@ async function health() {
 
 // ---------- left panel ----------
 
+function fmtIdle(ms) {
+  if (!ms || ms < 0) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `idle ${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `idle ${m}m`;
+  return `idle ${Math.floor(m / 60)}h`;
+}
+
 function renderWorkspaces() {
   const el = $("wsList");
   el.innerHTML = "";
+  // "Needs you" shelf: pty sessions gone quiet (likely awaiting input).
+  const waiting = state.sessions.filter((s) => s.activity === "waiting");
+  if (waiting.length) {
+    const shelf = document.createElement("div");
+    shelf.className = "ws-group attention";
+    const head = document.createElement("div");
+    head.className = "ws-head";
+    head.innerHTML = '<span class="caret">▼</span>';
+    const name = document.createElement("span");
+    name.className = "ws-name";
+    name.textContent = `NEEDS YOU (${waiting.length})`;
+    head.appendChild(name);
+    head.onclick = () => shelf.classList.toggle("closed");
+    shelf.appendChild(head);
+    const ul = document.createElement("ul");
+    ul.className = "ws-sessions";
+    const wsById = Object.fromEntries(state.workspaces.map((w) => [w.id, w]));
+    for (const s of waiting) {
+      const li = document.createElement("li");
+      li.className = "sess" + (s.id === state.activeSessionId ? " active" : "");
+      li.innerHTML = '<span class="sdot waiting"></span>';
+      const tag = document.createElement("span");
+      tag.className = "tag " + s.harness;
+      tag.textContent = s.harness;
+      const lbl = document.createElement("span");
+      lbl.className = "lbl";
+      const ws = wsById[s.workspaceId];
+      lbl.textContent = `${s.title || s.id} — ${ws ? ws.name : "?"} · ${fmtIdle(s.idleMs)}`;
+      li.append(tag, lbl);
+      li.onclick = () => activateSession(s.id);
+      ul.appendChild(li);
+    }
+    shelf.appendChild(ul);
+    el.appendChild(shelf);
+  }
   if (!state.workspaces.length) {
     el.innerHTML = '<div class="empty">No workspaces — open a folder to begin.</div>';
     return;
@@ -78,6 +122,7 @@ function renderWorkspaces() {
   for (const ws of state.workspaces) {
     const group = document.createElement("div");
     group.className = "ws-group" + (state.closedGroups.has(ws.id) ? " closed" : "");
+    group.dataset.ws = ws.id;
     const head = document.createElement("div");
     head.className = "ws-head";
     const caret = document.createElement("span");
@@ -135,8 +180,8 @@ function renderWorkspaces() {
       const li = document.createElement("li");
       li.className = "sess" + (s.id === state.activeSessionId ? " active" : "");
       const dot = document.createElement("span");
-      dot.className = "sdot " + (s.status || "starting");
-      dot.title = (s.status || "?") + (s.error ? ": " + s.error : "");
+      dot.className = "sdot " + (s.activity || s.status || "starting");
+      dot.title = `${s.activity || s.status || "?"}${s.error ? ": " + s.error : ""}${s.idleMs ? " · " + fmtIdle(s.idleMs) : ""}`;
       const tag = document.createElement("span");
       tag.className = "tag " + s.harness;
       tag.textContent = s.harness;
@@ -158,7 +203,9 @@ function renderWorkspaces() {
 function renderSessionBar() {
   const s = state.sessions.find((x) => x.id === state.activeSessionId);
   $("sessionTitle").textContent = s ? (s.title || s.id) : "No session selected";
-  $("sessionMeta").textContent = s ? `${s.harness} · ${s.mode} · ${s.status || "?"}` : "";
+  $("sessionMeta").textContent = s
+    ? `${s.harness} · ${s.mode} · ${s.activity || s.status || "?"}${s.idleMs ? " · " + fmtIdle(s.idleMs) : ""}`
+    : "";
   $("btnEnsure").disabled = !s;
   $("btnKill").disabled = !s;
 }
@@ -412,6 +459,128 @@ $("btnCollapse").onclick = () => {
   b.classList.toggle("collapsed");
   $("btnCollapse").textContent = b.classList.contains("collapsed") ? "▴" : "▾";
 };
+
+// ---------- quick-switcher palette (ctrl/cmd+k) ----------
+
+const pal = { open: false, items: [], sel: 0, q: "" };
+
+// Subsequence fuzzy score: higher = better. Non-matches score -1.
+function fuzzyScore(hay, needle) {
+  hay = hay.toLowerCase();
+  needle = needle.toLowerCase().replace(/\s+/g, "");
+  if (!needle) return 1;
+  let score = 0, hi = 0, streak = 0;
+  for (const ch of needle) {
+    const i = hay.indexOf(ch, hi);
+    if (i < 0) return -1;
+    streak = (i === hi) ? streak + 1 : 0;
+    score += 1 + streak * 2 + (i === 0 ? 3 : 0);
+    hi = i + 1;
+  }
+  return score - hay.length * 0.01;
+}
+
+function palItems() {
+  const wsById = Object.fromEntries(state.workspaces.map((w) => [w.id, w]));
+  const items = [];
+  for (const s of state.sessions) {
+    const ws = wsById[s.workspaceId];
+    items.push({
+      kind: "session",
+      label: s.title || s.id,
+      sub: `${s.harness} · ${ws ? ws.name : "?"} · ${s.activity || s.status || "?"}`,
+      hay: `${s.title || ""} ${s.harness} ${ws ? ws.name + " " + ws.path : ""} ${s.id}`,
+      run: () => activateSession(s.id),
+    });
+  }
+  for (const w of state.workspaces) {
+    items.push({
+      kind: "workspace",
+      label: w.name,
+      sub: w.path,
+      hay: `${w.name} ${w.path}`,
+      run: () => {
+        state.closedGroups.delete(w.id);
+        renderWorkspaces();
+        const el = document.querySelector(`[data-ws="${w.id}"]`);
+        if (el) el.scrollIntoView({ block: "nearest" });
+      },
+    });
+  }
+  items.push(
+    { kind: "action", label: "Open folder…", sub: "workspace", hay: "open folder workspace add", run: () => $("btnOpenFolder").click() },
+    { kind: "action", label: "New console", sub: "terminal", hay: "new console terminal shell", run: () => $("btnNewConsole").click() },
+  );
+  return items;
+}
+
+function renderPal() {
+  const list = $("palList");
+  list.innerHTML = "";
+  const scored = palItems()
+    .map((it) => ({ it, score: fuzzyScore(it.hay, pal.q) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
+  pal.items = scored.map((x) => x.it);
+  pal.sel = Math.min(pal.sel, Math.max(0, pal.items.length - 1));
+  if (!pal.items.length) {
+    list.innerHTML = '<div class="empty">no matches</div>';
+    return;
+  }
+  pal.items.forEach((it, i) => {
+    const d = document.createElement("div");
+    d.className = "pal-item" + (i === pal.sel ? " sel" : "");
+    const k = document.createElement("span");
+    k.className = "k";
+    k.textContent = it.kind === "session" ? "sess" : it.kind === "workspace" ? "ws" : "act";
+    const lbl = document.createElement("span");
+    lbl.textContent = it.label;
+    const sub = document.createElement("span");
+    sub.className = "sub";
+    sub.textContent = it.sub || "";
+    d.append(k, lbl, sub);
+    d.onclick = () => { closePal(); it.run(); };
+    d.onmousemove = () => { pal.sel = i; renderPal(); };
+    list.appendChild(d);
+  });
+}
+
+function openPal() {
+  pal.open = true;
+  pal.q = "";
+  pal.sel = 0;
+  $("palInput").value = "";
+  $("palette").classList.remove("hidden");
+  renderPal();
+  setTimeout(() => $("palInput").focus(), 30);
+}
+function closePal() {
+  pal.open = false;
+  $("palette").classList.add("hidden");
+}
+
+$("palInput").addEventListener("input", (e) => {
+  pal.q = e.target.value;
+  pal.sel = 0;
+  renderPal();
+});
+$("palInput").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); pal.sel = Math.min(pal.sel + 1, pal.items.length - 1); renderPal(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); pal.sel = Math.max(pal.sel - 1, 0); renderPal(); }
+  else if (e.key === "Enter") {
+    const it = pal.items[pal.sel];
+    if (it) { closePal(); it.run(); }
+  } else if (e.key === "Escape") closePal();
+});
+$("palette").addEventListener("click", (e) => { if (e.target.id === "palette") closePal(); });
+
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    pal.open ? closePal() : openPal();
+  } else if (e.key === "Escape" && pal.open) closePal();
+});
 
 // ---------- boot ----------
 (async function boot() {

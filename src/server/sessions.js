@@ -177,6 +177,32 @@ function ptyArgsFor(sess, h) {
   return h.args(null);
 }
 
+// Attention/activity model (pure — tested in tests/activity.test.js).
+//
+//   web sessions: process status only (we can't see inside the iframe).
+//   pty sessions: working  = output within the last 8s (likely generating)
+//                 waiting  = quiet longer (likely needs your input)
+//                 finished = PTY exited / no PTY ever spawned
+const WORKING_WINDOW_MS = 8000;
+
+function activityFor(sess, ptyInfo, now = Date.now()) {
+  if (sess.mode === "web") {
+    if (sess.status === "running") return { activity: "running", idleMs: 0 };
+    if (sess.status === "starting") return { activity: "starting", idleMs: 0 };
+    if (sess.status === "error") return { activity: "error", idleMs: 0 };
+    return { activity: "finished", idleMs: 0 };
+  }
+  if (!ptyInfo || ptyInfo.exited) return { activity: "finished", idleMs: 0 };
+  const idleMs = Math.max(0, now - (ptyInfo.lastOutputAt || now));
+  if (idleMs < WORKING_WINDOW_MS) return { activity: "working", idleMs };
+  return { activity: "waiting", idleMs };
+}
+
+// Enriched session for /api/state (store record + live activity).
+function describeSession(sess) {
+  const info = sess.mode === "pty" ? pty.info(`session:${sess.id}`) : null;
+  return { ...sess, ...activityFor(sess, info) };
+}
 // ensure = resume path: restart only if dead, else no-op.
 async function ensureSession(id) {
   const sess = sessionById(id);
@@ -285,4 +311,7 @@ module.exports = {
   createConsole,
   killConsole,
   ptyArgsFor,
+  activityFor,
+  describeSession,
+  WORKING_WINDOW_MS,
 };

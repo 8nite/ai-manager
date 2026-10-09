@@ -42,7 +42,7 @@ app.get("/health", (_req, res) => {
 app.get("/api/state", (_req, res) => {
   res.json({
     workspaces: store.getWorkspaces(),
-    sessions: store.getSessions(),
+    sessions: store.getSessions().map(sessions.describeSession),
     consoles: sessions.listConsoles(),
     harnesses: harnessNames(),
   });
@@ -82,7 +82,7 @@ app.post("/api/sessions", async (req, res) => {
 });
 
 app.get("/api/sessions", (_req, res) => {
-  res.json(store.getSessions());
+  res.json(store.getSessions().map(sessions.describeSession));
 });
 
 app.post("/api/sessions/:id/ensure", async (req, res) => {
