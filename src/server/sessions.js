@@ -162,8 +162,19 @@ function startPty(sess, ws, h) {
   const existing = pty.get(key);
   if (existing && !existing.exited) return;
   const bin = h.bin();
-  const args = h.args(sess.harnessSessionId || null);
+  const args = ptyArgsFor(sess, h);
   pty.spawn(key, bin, args, { cwd: ws.path, env: h.env(), cols: 100, rows: 30 });
+  if (!sess.everRan) store.updateSession(sess.id, { everRan: true });
+}
+
+// PTY respawn policy: first run is plain interactive; respawns after an
+// exit use `resume --last` so a droid conversation continues where it left
+// off instead of starting blank. (--last = most recent session in the
+// folder, which is ours unless the user ran another droid there meanwhile.)
+function ptyArgsFor(sess, h) {
+  if (sess.harnessSessionId) return h.args(sess.harnessSessionId);
+  if (sess.everRan && sess.harness === "droid") return ["resume", "--last"];
+  return h.args(null);
 }
 
 // ensure = resume path: restart only if dead, else no-op.
@@ -223,7 +234,10 @@ async function restoreAll() {
 }
 
 function shutdownAll() {
-  for (const s of store.getSessions()) killSessionProc(s.id);
+  for (const s of store.getSessions()) {
+    killSessionProc(s.id);
+    pty.kill(`session:${s.id}`);
+  }
   for (const c of listConsoles()) pty.kill(`console:${c.id}`);
 }
 
@@ -270,4 +284,5 @@ module.exports = {
   listConsoles,
   createConsole,
   killConsole,
+  ptyArgsFor,
 };

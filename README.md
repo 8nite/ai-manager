@@ -132,8 +132,9 @@ tests/       smoke tests (node --test)
   focus-mode) proxy. Only the *active* web session's root-absolute assets
   resolve remotely — concurrent multi-session web UIs over remote are
   best-effort.
-- `droid resume <id>`: the manager keeps the PTY alive while the server
-  runs; after a server restart it respawns `droid resume <storedId>` when a
-  harness session id was recorded, else plain `droid` (picker).
+- `droid resume`: the manager keeps the PTY alive while the server runs;
+  after a server restart (or PTY exit) it respawns with `droid resume --last`
+  (most recent session in that folder). Pass an explicit id via a future
+  session setting if the folder hosts several droid conversations.
 - dsh CLI flags may drift (developer preview); override with
   `DSH_BIN`/`DSH_ARGS` if `dsh web --port` changes upstream.

@@ -150,4 +150,4 @@ function handleUpgrade(req, socket, head, server) {
   try { socket.destroy(); } catch {}
 }
 
-module.exports = { explicitMiddleware, fallbackMiddleware, handleUpgrade, parseCookies };
+module.exports = { explicitMiddleware, fallbackMiddleware, handleUpgrade, parseCookies, proxyRequest, resolveFromUrl, targetForSession };

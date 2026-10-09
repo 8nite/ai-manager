@@ -18,6 +18,13 @@ const PORT = parseInt(process.env.AI_MGR_PORT || "4000", 10);
 const VERSION = require("../../package.json").version;
 
 const app = express();
+
+// Harness reverse proxy FIRST: express.json() below consumes request
+// streams for JSON bodies, which would strip POST/PUT bodies bound for
+// web harness backends. The proxy only intercepts /harness/* and /s/*
+// and calls next() for everything else.
+app.use(proxy.explicitMiddleware);
+
 app.use(express.json({ limit: "256kb" }));
 
 // ---- health ----
@@ -151,7 +158,8 @@ app.post("/api/pty/:kind/:id/resize", (req, res) => {
 });
 
 // ---- harness reverse proxy (explicit prefixes) ----
-app.use(proxy.explicitMiddleware);
+// NOTE: explicitMiddleware is mounted at the top (before express.json),
+// so this line is intentionally absent here. See above.
 
 // ---- static manager UI ----
 const PUBLIC = path.join(__dirname, "..", "public");

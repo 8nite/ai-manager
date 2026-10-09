@@ -97,7 +97,24 @@ function renderWorkspaces() {
     add.textContent = "+";
     add.title = `New session in ${ws.name}`;
     add.onclick = (e) => { e.stopPropagation(); openModal(ws.id); };
-    head.append(caret, name, add);
+    const del = document.createElement("button");
+    del.className = "ws-del";
+    del.textContent = "×";
+    del.title = `Remove workspace ${ws.name} (deletes its sessions)`;
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      const n = state.sessions.filter((s) => s.workspaceId === ws.id).length;
+      if (!confirm(`Remove workspace "${ws.name}" and its ${n} session(s)?`)) return;
+      await api("DELETE", `/api/workspaces/${ws.id}`).catch(() => {});
+      const active = state.sessions.find((s) => s.id === state.activeSessionId);
+      if (active && active.workspaceId === ws.id) {
+        // Active session belonged to this workspace — clear the stage.
+        state.activeSessionId = null;
+        teardownMain();
+      }
+      refresh();
+    };
+    head.append(caret, name, add, del);
     head.onclick = () => {
       if (state.closedGroups.has(ws.id)) state.closedGroups.delete(ws.id);
       else state.closedGroups.add(ws.id);

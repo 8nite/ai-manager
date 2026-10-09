@@ -69,6 +69,11 @@ button:hover { border-color: var(--neon); box-shadow: 0 0 8px #00f0ff55; }
   font-size: 15px; line-height: 1; padding: 1px 8px;
   color: var(--neon); border-color: #00f0ff55;
 }
+.ws-del {
+  font-size: 12px; line-height: 1; padding: 1px 7px;
+  color: var(--dim); opacity: .6;
+}
+.ws-del:hover { color: var(--bad); border-color: var(--bad); opacity: 1; }
 .ws-sessions { list-style: none; padding: 2px 4px 6px 18px; }
 .sess {
   display: flex; align-items: center; gap: 7px; padding: 5px 8px;
