@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Manager</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="logo">◈ AI·MANAGER</div>
+    <div class="top-actions">
+      <button id="btnOpenFolder" title="Open a folder as a workspace">＋ Open folder</button>
+      <span id="healthDot" class="dot" title="server health"></span>
+    </div>
+  </header>
+
+  <div id="middle">
+    <aside id="left">
+      <div class="panel-title">WORKSPACES</div>
+      <div id="wsList"></div>
+    </aside>
+
+    <main id="center">
+      <div id="sessionBar">
+        <span id="sessionTitle">No session selected</span>
+        <span id="sessionMeta"></span>
+        <span class="spacer"></span>
+        <button id="btnEnsure" title="Restart backend if dead (resume)">↻ resume</button>
+        <button id="btnKill" title="Delete this session">✕</button>
+      </div>
+      <div id="stage">
+        <iframe id="webview" class="hidden" title="harness"></iframe>
+        <div id="termWrap" class="hidden"></div>
+        <div id="emptyStage">
+          <div class="ghost">◈</div>
+          <p>Select a session on the left — or open a folder and press <b>+</b> to create one.</p>
+          <p class="dim">harnesses: opencode · droid · dsh (deepseek-harness)</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <footer id="bottom">
+    <div id="consoleTabs">
+      <span class="panel-title">CONSOLE</span>
+      <div id="conTabs"></div>
+      <button id="btnNewConsole" title="New console in the active workspace">＋</button>
+      <span class="spacer"></span>
+      <button id="btnCollapse" title="Collapse / expand">▾</button>
+    </div>
+    <div id="consoleBody"><div id="conTermWrap"></div></div>
+    <div id="statusline"><span id="statusText">ready</span></div>
+  </footer>
+</div>
+
+<div id="modal" class="hidden">
+  <div id="modalCard">
+    <h3 id="modalTitle">New session</h3>
+    <label>harness
+      <select id="fHarness">
+        <option value="opencode">opencode (web)</option>
+        <option value="droid">droid (terminal)</option>
+        <option value="dsh">dsh · deepseek-harness (web)</option>
+      </select>
+    </label>
+    <label>title <input id="fTitle" placeholder="optional"></label>
+    <div class="row">
+      <button id="fOk">create</button>
+      <button id="fCancel" class="ghost-btn">cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

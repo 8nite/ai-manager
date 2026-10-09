@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
+<title>Register device — OpenCode</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main class="card">
+  <h1>Register this device</h1>
+  <div id="step-collect">
+    <p>Tap below to create a passkey. After that, ask the admin to approve your device.</p>
+    <label>Device name
+      <input id="deviceName" type="text" placeholder="e.g. iPhone Herbert" value="">
+    </label>
+    <button id="start" class="primary">Create passkey</button>
+  </div>
+  <div id="step-done" hidden>
+    <h2 id="done-title">✓ Passkey created</h2>
+    <p>Your device <strong id="done-name"></strong> is registered.</p>
+    <p class="ask-admin"><strong>Please ask the admin to approve this device ID.</strong></p>
+    <p class="label">Your device ID</p>
+    <div class="id-row">
+      <code id="done-id"></code>
+      <button id="copy-id" type="button" class="secondary">Copy ID</button>
+    </div>
+    <p class="label" style="margin-top:14px">Send this to the admin</p>
+    <pre id="done-cmd"></pre>
+    <p id="status" class="hint">⏳ Waiting for admin approval&hellip; (this page updates automatically)</p>
+    <p class="hint" id="signin-row" hidden>Once approved, <a id="signin-link" href="/login">sign in here</a>.</p>
+  </div>
+  <p id="error" class="error" hidden></p>
+</main>
+<script>
+const nameEl = document.getElementById("deviceName");
+const startBtn = document.getElementById("start");
+const errorEl = document.getElementById("error");
+const collectEl = document.getElementById("step-collect");
+const doneEl = document.getElementById("step-done");
+
+function showError(m) { errorEl.textContent = m; errorEl.hidden = false; }
+function clearError() { errorEl.hidden = true; errorEl.textContent = ""; }
+
+// Auto-detect device name from user agent
+function detectDevice() {
+  const ua = navigator.userAgent;
+  let name = "";
+  if (ua.includes("iPhone")) name = "iPhone";
+  else if (ua.includes("iPad")) name = "iPad";
+  else if (ua.includes("Android")) {
+    // Extract model: "Android 14; Pixel 8"
+    const m = ua.match(/Android\s+[^;]+;\s*([^)]+)/);
+    name = m ? m[1].trim() : "Android";
+  } else if (ua.includes("Mac")) name = "Mac";
+  else if (ua.includes("Windows")) name = "Windows";
+  else if (ua.includes("Linux")) name = "Linux";
+  else name = "device";
+  // Append browser
+  if (ua.includes("Safari") && !ua.includes("Chrome")) name += " · Safari";
+  else if (ua.includes("Chrome")) name += " · Chrome";
+  else if (ua.includes("Firefox")) name += " · Firefox";
+  return name;
+}
+const detected = detectDevice();
+nameEl.value = detected;
+nameEl.title = navigator.userAgent;  // hover shows full UA string
+
+function b64uToBuf(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function b64uEncode(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+startBtn.addEventListener("click", async () => {
+  clearError();
+  const deviceName = nameEl.value.trim() || "device";
+  startBtn.disabled = true;
+  try {
+    // Tokenless self-service: the server generates a WebAuthn userId
+    // and stores a 5-min challenge. No token, no admin pre-approval.
+    const begin = await fetch("/auth/register/begin", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceName }),
+    }).then(r => r.json());
+    if (begin.error) throw new Error(begin.error);
+    const challengeId = begin.challengeId;
+    const opts = begin.options;
+    opts.challenge = b64uToBuf(opts.challenge);
+    opts.user.id = b64uToBuf(opts.user.id);
+    // Exclude list intentionally omitted (we want a new passkey)
+
+    const cred = await navigator.credentials.create({ publicKey: opts });
+    if (!cred) throw new Error("no credential returned");
+
+    const attestation = {
+      id: cred.id,
+      rawId: b64uEncode(new Uint8Array(cred.rawId)),
+      type: cred.type,
+      response: {
+        clientDataJSON: b64uEncode(new Uint8Array(cred.response.clientDataJSON)),
+        attestationObject: b64uEncode(new Uint8Array(cred.response.attestationObject)),
+      },
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    };
+
+    const fin = await fetch("/auth/register/finish", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attestation, deviceName, challengeId }),
+    }).then(r => r.json());
+    if (fin.error) throw new Error(fin.error);
+
+    collectEl.hidden = true;
+    doneEl.hidden = false;
+    // Every new device is PENDING on creation. The kube-pod admin must
+    // approve it via `gateway-admin pending approve <id>` before the
+    // user can sign in. The page polls /auth/pending-status/<id> every
+    // 3 s and flips to the "approved" state automatically.
+    document.getElementById("done-name").textContent = '"' + fin.deviceName + '"';
+    document.getElementById("done-id").textContent = fin.deviceId;
+    document.getElementById("done-cmd").textContent =
+      "kubectl -n nexvision exec deploy/ai-manager-gateway -- \\\n" +
+      "  gateway-admin pending approve " + fin.deviceId;
+
+    const copyBtn = document.getElementById("copy-id");
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(fin.deviceId);
+        copyBtn.textContent = "Copied ✓";
+        setTimeout(() => { copyBtn.textContent = "Copy ID"; }, 2000);
+      } catch {
+        copyBtn.textContent = "Copy failed";
+      }
+    });
+
+    const statusEl = document.getElementById("status");
+    const signinRow = document.getElementById("signin-row");
+    const pollOnce = async () => {
+      try {
+        const r = await fetch("/auth/pending-status/" + encodeURIComponent(fin.deviceId), { credentials: "omit" }).then(r => r.json());
+        if (r.approved) {
+          statusEl.textContent = "✓ Approved! You can sign in now.";
+          statusEl.className = "ok";
+          signinRow.hidden = false;
+          return true;
+        }
+      } catch {}
+      return false;
+    };
+    const poll = async () => {
+      const done = await pollOnce();
+      if (!done) setTimeout(poll, 3000);
+    };
+    poll();
+  } catch (e) {
+    showError(e.message || String(e));
+    startBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
