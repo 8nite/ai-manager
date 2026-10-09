@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Manager tunnel (WS bridge to ai-manager.nexvision.cc)
+After=network-online.target ai-manager.service
+Wants=network-online.target
+Requires=ai-manager.service
+
+[Service]
+Type=simple
+# Secret lives in a 0600 env file, never in this unit.
+EnvironmentFile=/home/herbert/.ai-manager/tunnel.env
+Environment=TUNNEL_URL=wss://ai-manager.nexvision.cc/tunnel
+Environment=LOCAL_HOST=127.0.0.1
+Environment=LOCAL_PORT=4000
+WorkingDirectory=/home/herbert/ai-manager
+ExecStart=/usr/bin/node scripts/ai-tunnel.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

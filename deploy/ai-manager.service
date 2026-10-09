@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Manager — local multi-harness session manager (web UI :4000)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/herbert/ai-manager
+ExecStart=/usr/bin/node src/server/index.js
+Environment=AI_MGR_PORT=4000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

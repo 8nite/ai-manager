@@ -73,6 +73,23 @@ opencode-auth gateway, re-pointed at `ai-manager.nexvision.cc`).
    open `https://ai-manager.nexvision.cc/register`, create a passkey, then
    `gateway-admin pending approve <deviceId>` (via kubectl exec as above).
 
+## Autostart on boot (systemd user units)
+
+Units live in `deploy/` (installed to `~/.config/systemd/user/`):
+
+```bash
+mkdir -p ~/.ai-manager ~/.config/systemd/user
+printf 'TUNNEL_TOKEN=...\n' > ~/.ai-manager/tunnel.env
+chmod 600 ~/.ai-manager/tunnel.env
+cp deploy/ai-manager.service deploy/ai-manager-tunnel.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ai-manager.service ai-manager-tunnel.service
+loginctl enable-linger $USER   # keep running after logout
+```
+
+`ai-manager-tunnel.service` requires `ai-manager.service`; both restart
+automatically. Logs: `journalctl --user -u ai-manager.service`.
+
 ## API (v0.1)
 
 - `GET /health` → `{ ok, version, workspaces, sessions, uptime }`
