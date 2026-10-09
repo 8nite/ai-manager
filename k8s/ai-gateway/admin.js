@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// k8s/opencode-auth/admin.js — CLI for managing the auth gateway
+// k8s/ai-gateway/admin.js — CLI for managing the auth gateway
 // Run via: kubectl -n nexvision exec deploy/ai-manager-gateway -- gateway-admin <cmd> [...]
 // Uses the same JSON registry as the server (mounted at /app/data/registry.json).
 const db = require("./db");

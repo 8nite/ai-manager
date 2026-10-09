@@ -1,4 +1,4 @@
-// k8s/opencode-auth/tunnel.js — WebSocket tunnel server (multiplexed HTTP-over-WS)
+// k8s/ai-gateway/tunnel.js — WebSocket tunnel server (multiplexed HTTP-over-WS)
 //
 // Protocol (JSON frames over a single WebSocket):
 //   Server → Client:

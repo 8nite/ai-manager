@@ -1,4 +1,4 @@
-// k8s/opencode-auth/server.js — main entry: HTTP + WebSocket server
+// k8s/ai-gateway/server.js — main entry: HTTP + WebSocket server
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -192,4 +192,16 @@ server.listen(PORT, () => {
   console.log(`[ai-manager-gateway] listening on :${PORT}, rpId=${db.get().rpId}`);
   // Run a GC sweep on startup to drop expired sessions/pending tokens
   db.gc();
+  // Install the `gateway-admin` CLI onto PATH so
+  // `kubectl exec deploy/ai-manager-gateway -- gateway-admin ...` works.
+  // The container runs as root, so symlinking into /usr/local/bin is fine;
+  // best-effort only — admin still works via `node /app/admin.js`.
+  try {
+    const fs = require("fs");
+    fs.chmodSync("/app/gateway-admin", 0o755);
+    try { fs.unlinkSync("/usr/local/bin/gateway-admin"); } catch {}
+    fs.symlinkSync("/app/gateway-admin", "/usr/local/bin/gateway-admin");
+  } catch (e) {
+    console.log(`[ai-manager-gateway] gateway-admin install skipped: ${e.message}`);
+  }
 });

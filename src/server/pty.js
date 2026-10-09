@@ -44,7 +44,9 @@ function spawn(key, file, args, opts = {}) {
     if (entry.backlog.length > CAP) entry.backlog = entry.backlog.slice(-CAP);
     for (const res of [...entry.subs]) {
       try {
-        res.write(`data: ${JSON.stringify({ type: "data", data }).slice(0, 65536)}\n\n`);
+        // Slice the raw data BEFORE stringifying — slicing stringified
+        // JSON can cut a multi-byte char/escape and break the client's parse.
+        res.write(`data: ${JSON.stringify({ type: "data", data: data.slice(0, 16000) })}\n\n`);
       } catch {
         entry.subs.delete(res);
       }

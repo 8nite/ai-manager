@@ -1,4 +1,4 @@
-// k8s/opencode-auth/webauthn.js — WebAuthn registration & authentication
+// k8s/ai-gateway/webauthn.js — WebAuthn registration & authentication
 // Uses @simplewebauthn/server. The RP ID is the public hostname (no port, no scheme).
 //
 // Challenge model:

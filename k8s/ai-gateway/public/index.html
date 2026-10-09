@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
-<title>OpenCode</title>
+<title>AI Manager</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <main class="card">
-  <h1>OpenCode</h1>
+  <h1>AI Manager</h1>
   <p id="status">Loading…</p>
   <div id="actions" hidden>
     <button id="login" class="primary">Sign in with passkey</button>
@@ -31,15 +31,15 @@
     if (!r.ok) throw new Error("health check failed: " + r.status);
     const h = await r.json();
     statusEl.textContent = h.tunnelConnected
-      ? "Tunnel online. Sign in to access opencode."
-      : "Tunnel offline. Start the local opencode tunnel and reload.";
+      ? "Tunnel online. Sign in to access AI Manager."
+      : "Tunnel offline. Start the local ai-manager tunnel and reload.";
     actionsEl.hidden = false;
   } catch (e) {
     showError(e.message);
     return;
   }
 
-  // If we already have a session cookie, jump straight to the opencode UI.
+  // If we already have a session cookie, jump straight to the AI Manager UI.
   try {
     const r = await fetch("/api/me", { credentials: "include" });
     if (r.ok) { window.location.href = "/"; return; }

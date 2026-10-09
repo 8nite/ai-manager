@@ -1,4 +1,4 @@
-// k8s/opencode-auth/db.js — JSON-file device & session registry
+// k8s/ai-gateway/db.js — JSON-file device & session registry
 // Persistence: one JSON file, atomic writes via temp+rename. No native deps.
 const fs = require("fs");
 const path = require("path");

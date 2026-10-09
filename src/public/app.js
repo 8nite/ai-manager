@@ -13,6 +13,7 @@ const state = {
   activeSessionId: null,
   activeConsoleId: null,
   modalWorkspaceId: null,
+  closedGroups: new Set(),
   es: null, // active main EventSource
   conEs: null, // active console EventSource
   mainTerm: null, mainFit: null,
@@ -76,7 +77,7 @@ function renderWorkspaces() {
   }
   for (const ws of state.workspaces) {
     const group = document.createElement("div");
-    group.className = "ws-group";
+    group.className = "ws-group" + (state.closedGroups.has(ws.id) ? " closed" : "");
     const head = document.createElement("div");
     head.className = "ws-head";
     const caret = document.createElement("span");
@@ -97,7 +98,11 @@ function renderWorkspaces() {
     add.title = `New session in ${ws.name}`;
     add.onclick = (e) => { e.stopPropagation(); openModal(ws.id); };
     head.append(caret, name, add);
-    head.onclick = () => group.classList.toggle("closed");
+    head.onclick = () => {
+      if (state.closedGroups.has(ws.id)) state.closedGroups.delete(ws.id);
+      else state.closedGroups.add(ws.id);
+      group.classList.toggle("closed");
+    };
     group.appendChild(head);
 
     const ul = document.createElement("ul");
@@ -179,6 +184,18 @@ async function activateSession(id) {
   }
 }
 
+// POST terminal input; surfaces "exited" instead of failing silently.
+async function postInput(kind, id, data, term) {
+  try {
+    const r = await fetch(`/api/pty/${kind}/${id}/input`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    });
+    if (r.status === 410 && term) {
+      term.write("\r\n\x1b[31m[terminal exited — press \u21bb resume (sessions) or recreate the console]\x1b[0m\r\n");
+    }
+  } catch {}
+}
 function makeTerm(container) {
   if (!hasXterm) {
     container.innerHTML = '<div class="empty">xterm.js failed to load (CDN unreachable). Terminal unavailable.</div>';
@@ -202,12 +219,7 @@ function attachMainTerm(sessionId) {
   state.mainTerm = made.term;
   state.mainFit = made.fit;
   const kind = "session";
-  state.mainTerm.onData((d) => {
-    fetch(`/api/pty/${kind}/${sessionId}/input`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: d }),
-    }).catch(() => {});
-  });
+  state.mainTerm.onData((d) => postInput(kind, sessionId, d, state.mainTerm));
   const es = new EventSource(`/api/pty/${kind}/${sessionId}/stream`);
   state.es = es;
   es.onmessage = (ev) => {
@@ -289,12 +301,7 @@ function activateConsole(id, soft) {
   if (!made) return;
   state.conTerm = made.term;
   state.conFit = made.fit;
-  state.conTerm.onData((d) => {
-    fetch(`/api/pty/console/${id}/input`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data: d }),
-    }).catch(() => {});
-  });
+  state.conTerm.onData((d) => postInput("console", id, d, state.conTerm));
   const es = new EventSource(`/api/pty/console/${id}/stream`);
   state.conEs = es;
   es.onmessage = (ev) => {
@@ -325,7 +332,12 @@ function openModal(workspaceId) {
 }
 function closeModal() { $("modal").classList.add("hidden"); }
 
-$("fOk").onclick = async () => {
+$("fOk").onclick = submitModal;
+$("fCancel").onclick = closeModal;
+$("fTitle").addEventListener("keydown", (e) => { if (e.key === "Enter") submitModal(); });
+$("fHarness").addEventListener("keydown", (e) => { if (e.key === "Enter") submitModal(); });
+
+async function submitModal() {
   const harness = $("fHarness").value;
   const title = $("fTitle").value.trim();
   closeModal();
@@ -335,8 +347,7 @@ $("fOk").onclick = async () => {
     await refresh();
     activateSession(s.id);
   } catch (e) { status("create failed", e.message); }
-};
-$("fCancel").onclick = closeModal;
+}
 
 $("btnOpenFolder").onclick = async () => {
   const p = prompt("Folder path to open as workspace:");

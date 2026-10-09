@@ -1,4 +1,4 @@
-# k8s/opencode-auth/deploy.yaml
+# k8s/ai-gateway/deploy.yaml
 # Manifests for the ai-manager.nexvision.cc WebAuthn + WebSocket-tunnel gateway.
 #
 # Topology:
@@ -8,11 +8,11 @@
 #         → ai-manager-gateway Pod :3000
 #           ├─ /health, /auth/*, /login, /register, /styles.css  (served by the gateway)
 #           └─ /tunnel  (WebSocket upgrade, authenticated by tunnel token)
-#           └─ everything else  (requires session cookie, proxied to local opencode via tunnel)
+#           └─ everything else  (requires session cookie, proxied to the local ai-manager via tunnel)
 #
 # Local machine:
-#   opencode serve --port 3000 --cors https://ai-manager.nexvision.cc
-#   TUNNEL_TOKEN=... node scripts/opencode-tunnel.js
+#   npm start                                         # manager UI on :4000
+#   TUNNEL_TOKEN=... node scripts/ai-tunnel.js
 #
 # Registration is tokenless self-service. The user opens
 # https://ai-manager.nexvision.cc/register, creates a passkey, and gets a
@@ -71,6 +71,11 @@ spec:
                 [ -e "$f" ] || continue
                 cp "$f" /app/
               done
+              # The gateway-admin wrapper (no .js extension) + exec bit.
+              if [ -e /code/gateway-admin ]; then
+                cp /code/gateway-admin /app/gateway-admin
+                chmod +x /app/gateway-admin
+              fi
               # ConfigMap keys like "public_index_html" hold the contents of
               # the public static files. Rename them on the way out.
               for f in /code/public_*; do
@@ -205,13 +210,13 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
-    # opencode serve uses SSE for streaming responses; no buffering
+    # Harness web UIs + terminal streams use SSE; no buffering
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-body-size: "16m"
     # The /tunnel path is the WebSocket endpoint; mark the service so nginx
     # handles Upgrade: websocket correctly
     nginx.ingress.kubernetes.io/websocket-services: ai-manager-gateway
-    # CORS: opencode's web UI may do cross-origin requests; allow our origin
+    # CORS: harnesses may do cross-origin requests; allow our origin
     nginx.ingress.kubernetes.io/enable-cors: "true"
     nginx.ingress.kubernetes.io/cors-allow-origin: "https://ai-manager.nexvision.cc"
     nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, OPTIONS"

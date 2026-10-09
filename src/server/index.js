@@ -157,6 +157,12 @@ app.use(proxy.explicitMiddleware);
 const PUBLIC = path.join(__dirname, "..", "public");
 app.use(express.static(PUBLIC, { index: "index.html" }));
 
+// Unknown /api/* → JSON 404 (must sit before the asset fallback, else a
+// mistyped API path would return the SPA or get proxied to a harness).
+app.use("/api/", (_req, res) => {
+  res.status(404).json({ error: "unknown api route" });
+});
+
 // ---- fallback: active-session asset proxy, else SPA ----
 app.use(proxy.fallbackMiddleware);
 app.get("*", (req, res, next) => {

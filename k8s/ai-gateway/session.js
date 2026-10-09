@@ -1,4 +1,4 @@
-// k8s/opencode-auth/session.js — Express middleware that requires a valid session cookie
+// k8s/ai-gateway/session.js — Express middleware that requires a valid session cookie
 const db = require("./db");
 
 function requireSession(req, res, next) {

@@ -60,10 +60,9 @@ opencode-auth gateway, re-pointed at `ai-manager.nexvision.cc`).
    kubectl apply -f k8s/ai-gateway/deploy.yaml
    bash scripts/build-gateway-configmap.sh apply
    ```
-2. Create a tunnel token (note: the admin CLI runs via node, as on the
-   opencode gateway — there is no `gateway-admin` binary on PATH):
+2. Create a tunnel token:
    ```bash
-   kubectl -n nexvision exec deploy/ai-manager-gateway -- node /app/admin.js tunnel-token create --name "my-laptop"
+   kubectl -n nexvision exec deploy/ai-manager-gateway -- gateway-admin tunnel-token create --name "my-laptop"
    ```
 3. Start the tunnel client on this machine:
    ```bash
@@ -72,7 +71,7 @@ opencode-auth gateway, re-pointed at `ai-manager.nexvision.cc`).
    ```
 4. Register + approve your device (same flow as opencode.nexvision.cc):
    open `https://ai-manager.nexvision.cc/register`, create a passkey, then
-   `node /app/admin.js pending approve <deviceId>` (via kubectl exec as above).
+   `gateway-admin pending approve <deviceId>` (via kubectl exec as above).
 
 ## API (v0.1)
 
