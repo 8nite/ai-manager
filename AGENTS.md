@@ -99,9 +99,13 @@ pane 1 explicitly first — a fresh page boots with empty panes.
   around it — unpinned, shared adopt fails on the real port and the test
   spawns a live `opencode serve` mid-suite. After the suite, the shared
   port (default 4090) must be free.
-- E2E ports: only `MGR_PORT` and `HARNESS_BASE-10` (the shared backend
-  port) must be free — the base port itself is no longer allocated for
-  opencode. The script gates all three.
+- E2E ports: with opencode on PTY there is no shared backend — only
+  `MGR_PORT` and `HARNESS_BASE` must be free (the script gates both; the old
+  `HARNESS_BASE-10` shared-port gate is gone).
+- `node --test` silently skipping everything (`run() called recursively`)
+  means a leaked `NODE_TEST_CONTEXT=child-v8` in the shell env (leftover of
+  an interrupted run) — always run the suite as
+  `env -u NODE_TEST_CONTEXT node --test ...` (learned 2026-10-14).
 - Default `HARNESS_BASE=4300` is held by a LIVE backend, so a scratch
   manager's `allocPort` picks it and `tryAdoptBackend` adopts the live
   backend into the scratch run. Prefer `MGR_PORT=4002 HARNESS_BASE=4450`

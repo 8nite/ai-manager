@@ -164,3 +164,13 @@ e2e assert ("splitter keeps unpunctuated tail whole"; e2e 0 failures).
 Related: [[harness-switch]] (same topbar surface), [[attention-dismiss]]
 (waiting = the highest-value utterance), [[session-switch-cache]]
 (e2e port discipline).
+
+## E2E on quiet PTYs only (2026-10-14)
+
+Opencode TUI output floods `narrateFeed`: backlog replay + repaint frames
+evict fed test text (4k cap) before the read, and `isNoiseLine` drops TUI
+bytes so the queue stays empty (`lastContent: ""`). The engine is
+harness-agnostic, so e2e feeds a quiet droid PTY instead, reads the buffer
+atomically in the feed eval, and settles fresh sessions to stable `waiting`
+across consecutive polls before feeding (birth transitions preempt content
+by design). See [[opencode-pty]].

@@ -64,3 +64,15 @@ test("ptyArgsFor: explicit agy conversation id wins over --continue", () => {
     ["--model", "gemini-3.8-flash-low", "--conversation", "conv-abc"]
   );
 });
+
+test("ptyArgsFor: opencode resumes by session id, fresh otherwise", () => {
+  const h = getHarness("opencode");
+  assert.deepEqual(
+    sessions.ptyArgsFor({ harness: "opencode", harnessSessionId: "ses_abc" }, h),
+    ["--session", "ses_abc"]
+  );
+  // Unbound respawns stay plain: a global --continue could resume another
+  // workspace's chat; a bad --session id would plant a confusing newcomer.
+  assert.deepEqual(sessions.ptyArgsFor({ harness: "opencode", everRan: true }, h), []);
+  assert.deepEqual(sessions.ptyArgsFor({ harness: "opencode", everRan: false }, h), []);
+});

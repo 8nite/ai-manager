@@ -256,6 +256,97 @@ async function migrateToShared(id) {
   return sessionById(id);
 }
 
+// Retire the shared `opencode serve` once nothing uses it anymore (all
+// opencode sessions migrated web→pty). Only our own child handle is ever
+// signaled — an adopted backend (no handle) is left alone; it holds no
+// unique data (chats live in the global store the TUI shares) and can be
+// reaped by hand.
+function maybeRetireSharedBackend() {
+  if (!_sharedProcAlive()) return;
+  const anyWeb = store.getSessions().some(
+    (s) => s && s.harness === "opencode" && s.mode === "web"
+  );
+  if (anyWeb) return;
+  const proc = _sharedProc;
+  _sharedProc = null;
+  try { proc.kill("SIGTERM"); } catch {}
+}
+
+// Opencode PTY sessions: adopt the backend chat id for `--session` resume.
+//
+// A fresh TUI owns no server chat until its first prompt (drafts are
+// client-side), so there is nothing to capture at spawn. Poll
+// `opencode session list` (newest-first, current project) and claim the
+// newest chat in this workspace that appeared after the manager session was
+// created and isn't claimed by another session. Best-effort, never throws;
+// converges to zero work (only hid-less sessions are listed). The callers
+// fire-and-forget it so polls never wait on CLI spawns.
+function backfillOpencodeHarnessId(id) {
+  const sess = sessionById(id);
+  if (!sess || sess.harness !== "opencode" || sess.mode !== "pty" || sess.harnessSessionId) {
+    return Promise.resolve(null);
+  }
+  const ws = workspaceById(sess.workspaceId);
+  if (!ws) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    let proc = null;
+    try {
+      proc = spawn(getHarness("opencode").bin(),
+        ["session", "list", "--format", "json", "-n", "10"], { cwd: ws.path });
+    } catch {
+      return fin(null);
+    }
+    const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} fin(null); }, 10000);
+    if (timer.unref) timer.unref();
+    let out = "";
+    proc.stdout.on("data", (c) => { out += String(c).slice(0, 20000); });
+    proc.on("error", () => { clearTimeout(timer); fin(null); });
+    proc.on("close", () => {
+      clearTimeout(timer);
+      try {
+        const d = JSON.parse(out || "{}");
+        const items = Array.isArray(d) ? d : d.data || [];
+        const claimed = new Set(
+          store.getSessions().filter((s) => s.id !== id).map((s) => s.harnessSessionId).filter(Boolean)
+        );
+        const hit = (items || []).find((c) =>
+          c && c.id && !claimed.has(c.id) &&
+          (!c.directory || c.directory === ws.path) &&
+          (Number(c.created) || 0) >= (sess.createdAt || 0) - 5000
+        );
+        if (!hit) return fin(null);
+        const upd = { harnessSessionId: hit.id };
+        // Adopt a real backend title while the local one is still the
+        // creation default (mirrors syncSessionTitle's one-way rule: never
+        // revert a local derived/custom title).
+        const t = String(hit.title || "").trim().replace(/\s+/g, " ");
+        try {
+          if (t && t !== defaultTitleFor(sess) &&
+            !t.startsWith(`${getHarness("opencode").label} · `) &&
+            isDefaultLikeTitle(sessionById(id))) {
+            upd.title = t.length > RENAME_TITLE_MAX ? t.slice(0, RENAME_TITLE_MAX) : t;
+          }
+        } catch {}
+        store.updateSession(id, upd);
+        fin(sessionById(id));
+      } catch {
+        fin(null);
+      }
+    });
+  });
+}
+
+async function backfillOpencodeIds() {
+  const targets = store.getSessions().filter(
+    (s) => s && s.harness === "opencode" && s.mode === "pty" && !s.harnessSessionId
+  );
+  if (!targets.length) return [];
+  const out = await Promise.allSettled(targets.map((s) => backfillOpencodeHarnessId(s.id)));
+  return out.map((r) => (r.status === "fulfilled" ? r.value : null));
+}
+
 function waitForPort(host, port, timeoutMs) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -431,8 +522,10 @@ async function startSession(id) {
   if (!ws) throw new Error(`workspace gone for session ${id}`);
   const h = getHarness(sess.harness);
   if (sess.mode !== h.mode) {
-    // Harness changed modes across versions (dsh web→pty): adopt the current
-    // mode instead of booting stale web state with CLI args.
+    // Harness changed modes across versions (dsh web→pty, opencode web→pty):
+    // adopt the current mode instead of booting stale web state with CLI
+    // args. harnessSessionId carries over: the TUI shares the old serve
+    // backend's session store, so `--session <hid>` continues the chat.
     killSessionProc(sess.id);
     store.updateSession(id, {
       mode: h.mode,
@@ -441,6 +534,7 @@ async function startSession(id) {
       error: null,
     });
     sess = sessionById(id);
+    maybeRetireSharedBackend();
   }
 
   if (h.mode === "web") {
@@ -1351,17 +1445,6 @@ function renameSession(id, title) {
 // Reboot existing definitions on server start (best-effort, sequential).
 async function restoreAll() {
   const all = store.getSessions();
-  // Boot the shared backend once up front so opencode restores backfill
-  // chats instead of each paying adopt/spawn latency in series.
-  const op = all.find((s) => isSharedOpencode(s));
-  if (op) {
-    const ws = workspaceById(op.workspaceId);
-    try {
-      await ensureSharedBackend(ws && ws.path);
-    } catch (e) {
-      process.stderr.write(`[shared] boot restore failed: ${e && e.message}\n`);
-    }
-  }
   for (const s of all) {
     try {
       store.updateSession(s.id, { status: "starting", error: null });
@@ -1447,6 +1530,9 @@ module.exports = {
   isSharedOpencode,
   ensureSharedBackend,
   migrateToShared,
+  maybeRetireSharedBackend,
+  backfillOpencodeHarnessId,
+  backfillOpencodeIds,
   _resetSharedForTest,
   WORKING_WINDOW_MS,
   PICKUP_GRACE_MS,

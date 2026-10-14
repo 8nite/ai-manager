@@ -26,3 +26,4 @@ links: [[prod-web-testing]], [[opencode-v2-web]], [[manager-proxy-remote]], [[br
 - [[shared-backend]] — one `opencode serve` (`HARNESS_BASE-10`, live :4090) hosts all sessions as chats; idle-gated legacy migration, per-port `/active` batching, orphan reclaim.
 - [[asset-cache]] — proxy stamps `immutable` year-cache on hashed `/_assets/*` (API untouched); cold switches over the tunnel cost doc + API only. Follow-up: 30s cache for workspace config GETs (`x-aimgr-cache` HIT/MISS), per-session state never cached.
 - [[client-nav-switch]] — one live SPA per pane, same-backend switches navigate opencode's router (no reboot); verified nav + fallback, `dataset.sess` is the shown-session truth.
+- [[opencode-pty]] — opencode harness runs as a PTY TUI (2026-10-14); web embedding retired, resume by chat id, chat-id backfill, shared-serve retirement, narrate/shelf e2e lessons.

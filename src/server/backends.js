@@ -14,20 +14,15 @@ const BASE_PORT = parseInt(process.env.AI_MGR_HARNESS_BASE_PORT || "4100", 10);
 const HARNESSES = {
   opencode: {
     label: "opencode",
-    mode: "web",
+    mode: "pty",
     bin: () => process.env.OPENCODE_BIN || "opencode",
-    args: (port) => ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
-    waitPath: "/",
-    // Stable manager-held password so the iframe auto-connects without a
-    // manual server picker. Proxy injects it upstream (see proxy.js).
-    // ponytail: single shared secret, not per-session — rotation = restart.
-    env: () => {
-      try {
-        return { OPENCODE_SERVER_PASSWORD: require("./opencodeAuth").getPassword() };
-      } catch {
-        return {};
-      }
-    },
+    // TUI in the manager terminal (like droid/agy). Resume: `--session
+    // <id>` continues that exact chat (same store the old serve backend
+    // used, so pre-migration web chats carry over via harnessSessionId).
+    // A bad id creates a fresh chat under it — never another session's.
+    // No global `--continue`: that would resume another workspace's chat.
+    args: (resumeId) => (resumeId ? ["--session", String(resumeId)] : []),
+    env: () => ({}),
   },
   dsh: {
     label: "deepseek-harness",
