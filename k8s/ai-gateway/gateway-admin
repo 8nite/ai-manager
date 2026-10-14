@@ -1,5 +1,0 @@
-#!/bin/sh
-# gateway-admin — admin CLI for the ai-manager gateway.
-# Installed to /usr/local/bin at gateway startup (see server.js bootstrap),
-# so `kubectl exec deploy/ai-manager-gateway -- gateway-admin ...` works.
-exec node /app/admin.js "$@"

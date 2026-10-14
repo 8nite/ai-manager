@@ -17,8 +17,9 @@ Supported harnesses (v0.1):
 | Harness | Backend | How it runs |
 |---|---|---|
 | `opencode` | web UI | `opencode serve --port <auto>` in the workspace dir, shown in an iframe |
-| `dsh` (deepseek-harness) | web UI | `dsh web --port <auto>` (via `npx -y @deepseek-ai/dsh`) in the workspace dir, shown in an iframe |
+| `dsh` (deepseek-harness) | terminal (one-shot CLI) | `dsh headless "<goal>"` (via `npx -y @deepseek-ai/dsh`) in the workspace dir, streamed to xterm.js; Resume re-runs the goal |
 | `droid` | terminal UI | `droid` PTY in the workspace dir, rendered with xterm.js in the main window |
+| `agy` (antigravity) | terminal UI | `agy` PTY in the workspace dir (default model `gemini-3.8-flash-low`), rendered with xterm.js in the main window |
 
 Remote access works exactly like `opencode.nexvision.cc`: run the tunnel
 client on this machine and open `https://ai-manager.nexvision.cc`
@@ -30,8 +31,10 @@ client on this machine and open `https://ai-manager.nexvision.cc`
 - Node.js 20+
 - `opencode` on `PATH` (for opencode sessions)
 - `droid` on `PATH` (for droid sessions)
+- `agy` on `PATH` (for agy sessions; Antigravity CLI, signed in)
 - For `dsh` sessions: network access to npm (runs `npx -y @deepseek-ai/dsh`),
-  plus a DeepSeek API key configured in the dsh web UI (Settings → Models)
+  plus a DeepSeek API key (`DEEPSEEK_API_KEY` env or dsh credentials store).
+  New dsh sessions require a goal — it becomes the one-shot `headless` task.
 
 ## Run locally
 
@@ -50,8 +53,10 @@ Env vars:
 | `AI_MGR_HARNESS_BASE_PORT` | `4100` | first auto-allocated harness port |
 | `OPENCODE_BIN` | `opencode` | opencode binary |
 | `DROID_BIN` | `droid` | droid binary (+ `DROID_ARGS`) |
-| `DSH_BIN` | `npx` | dsh launcher (+ `DSH_ARGS`, default `-y @deepseek-ai/dsh web`) |
+| `DSH_BIN` | `npx` | dsh launcher (+ `DSH_ARGS` full argv override, default `-y @deepseek-ai/dsh headless`) |
+| `AGY_BIN` | `agy` | agy binary (+ `AGY_MODEL` default `gemini-3.8-flash-low`, `AGY_ARGS` full argv override) |
 | `AI_MGR_SHELL` | auto | console shell (`powershell.exe` on win32, else `bash`) |
+| `AI_MGR_OPENCODE_PASSWORD` | `~/.ai-manager/opencode-password` (generated) | stable password for per-session `opencode serve`; proxy injects it so new sessions auto-connect locally |
 
 ## Remote access
 
@@ -103,7 +108,7 @@ PTY sessions (droid, consoles) report live activity in `/api/state`:
 | `waiting` | quiet longer — likely needs your input (amber pulse + NEEDS YOU shelf) |
 | `finished` | PTY exited |
 
-Web sessions (opencode/dsh) report process status only (`running`,
+Web sessions (opencode) report process status only (`running`,
 `starting`, `error`, `finished`) — the manager can't see inside their
 iframes.
 
@@ -133,7 +138,7 @@ src/server/  manager HTTP server (express, no build step)
   index.js     wiring: static + api + proxy + pty streams
   store.js     JSON persistence (workspaces + sessions)
   sessions.js  session/console lifecycle + port allocation
-  backends.js  harness definitions (opencode web, dsh web, droid pty)
+  backends.js  harness definitions (opencode web, dsh/droid/agy pty)
   proxy.js     /harness + /s reverse proxy (http + upgrade)
   pty.js       node-pty pool with backlog + SSE fanout
 src/public/  futuristic UI (vanilla JS, xterm.js via CDN)
@@ -153,5 +158,14 @@ tests/       smoke tests (node --test)
   after a server restart (or PTY exit) it respawns with `droid resume --last`
   (most recent session in that folder). Pass an explicit id via a future
   session setting if the folder hosts several droid conversations.
-- dsh CLI flags may drift (developer preview); override with
-  `DSH_BIN`/`DSH_ARGS` if `dsh web --port` changes upstream.
+- dsh runs one-shot (`headless`): no interactive follow-ups in-session —
+  Resume re-runs the goal; use `--session-id` via a future session setting
+  to continue a persisted run. Override the whole argv with
+  `DSH_BIN`/`DSH_ARGS` if upstream flags drift.
+- agy first boots plain interactive; respawns after an exit use
+  `--continue` (most recent conversation *globally* — keep one agy session
+  per workspace, or set an explicit conversation id to resume via
+  `--conversation`). First boot in a new folder stops at a trust prompt
+  (press Enter once; persisted globally). The `--model` flag prints a
+  spurious "not recognized … Ignoring the flag" warning on agy 1.3.3 but
+  still takes effect (verified: status bar shows the requested model).

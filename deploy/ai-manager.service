@@ -8,6 +8,7 @@ Type=simple
 WorkingDirectory=/home/herbert/ai-manager
 ExecStart=/usr/bin/node src/server/index.js
 Environment=AI_MGR_PORT=4000
+Environment=AI_MGR_HOST=0.0.0.0
 Restart=always
 RestartSec=5
 StandardOutput=journal

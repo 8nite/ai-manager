@@ -35,6 +35,31 @@ let backoff = 1000;
 let stopping = false;
 const inflight = new Map();  // id → {req, timer}
 
+// Stall watchdog state (see shouldRecycleTunnel below). Updated on every
+// inbound frame; the interval in the boot section recycles a half-open socket
+// (e.g. 3MB Send-Q stuck home→k8s with no close event) instead of hanging
+// in-flight requests until the gateway's 5min timeout.
+let lastInboundAt = Date.now();
+let stallSince = 0; // first-seen timestamp of bufferedAmount over the limit, else 0
+const SEND_STALL_LIMIT = 1 * 1024 * 1024; // 1MB unsent
+const SEND_STALL_MS = 30_000;             // sustained this long → recycle
+const SILENT_RECYCLE_MS = 90_000;         // no inbound frame this long → recycle
+
+// Pure decision for the watchdog above. Returns a reason string when the
+// tunnel should be recycled, else null. Exported for tests.
+//   bufferedAmount: ws.bufferedAmount (bytes the kernel hasn't ACKed)
+//   stalledMs: how long bufferedAmount has been over SEND_STALL_LIMIT
+//   silentMs: how long since the last inbound frame
+function shouldRecycleTunnel({ bufferedAmount, stalledMs, silentMs }) {
+  if (bufferedAmount > SEND_STALL_LIMIT && stalledMs > SEND_STALL_MS) {
+    return `send stalled (${Math.round(bufferedAmount / 1024)}KB unsent for ${Math.round(stalledMs / 1000)}s)`;
+  }
+  if (silentMs > SILENT_RECYCLE_MS) {
+    return `silent for ${Math.round(silentMs / 1000)}s (half-open suspected)`;
+  }
+  return null;
+}
+
 function log(...a) { console.log("[" + new Date().toISOString().slice(11,19) + "]", ...a); }
 
 function connect() {
@@ -43,7 +68,7 @@ function connect() {
   log("connecting to", fullUrl, "→ local", HOST + ":" + PORT);
   ws = new WebSocket(fullUrl, { handshakeTimeout: 15000 });
 
-  ws.on("open", () => { backoff = 1000; log("tunnel UP"); });
+  ws.on("open", () => { backoff = 1000; lastInboundAt = Date.now(); stallSince = 0; log("tunnel UP"); });
   ws.on("close", (code, reason) => {
     // When the server rejects a duplicate connection (4003), back off harder
     // instead of joining the reconnect ping‑pong.
@@ -58,6 +83,7 @@ function connect() {
   });
   ws.on("error", (e) => log("tunnel error:", e.message));
   ws.on("message", (raw) => {
+    lastInboundAt = Date.now();
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.type === "ping") {
@@ -255,13 +281,51 @@ function checkBackendHealth() {
   req.end();
 }
 
-// Check backend health periodically
-setInterval(checkBackendHealth, BACKEND_CHECK_INTERVAL);
-// Initial check
-checkBackendHealth();
+// Watchdog: recycle a half-open tunnel socket. A stalled TCP (uplink
+// congestion, dead NAT mapping) emits no close/error, so without this the
+// client would queue responses behind megabytes of unsent bytes until the
+// gateway's 5min timeout — while browsers abort at the opencode frontend's
+// 60s headers timeout ("Transport: Timed out waiting for the server").
+// Terminating triggers the existing close handler, which reconnects with
+// backoff; the gateway fail-fast 502s the stale in-flight and ingress
+// retries them against the fresh socket.
+function checkTunnelStall() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { stallSince = 0; return; }
+  let buffered = 0;
+  try { buffered = ws.bufferedAmount || 0; } catch { buffered = 0; }
+  const now = Date.now();
+  if (buffered > SEND_STALL_LIMIT) {
+    if (!stallSince) stallSince = now;
+  } else {
+    stallSince = 0;
+  }
+  const reason = shouldRecycleTunnel({
+    bufferedAmount: buffered,
+    stalledMs: stallSince ? now - stallSince : 0,
+    silentMs: now - lastInboundAt,
+  });
+  if (reason) {
+    log(`tunnel stalled, recycling: ${reason}`);
+    stallSince = 0;
+    try { ws.terminate(); } catch { try { ws.close(); } catch {} }
+  }
+}
 
-// Graceful shutdown
-process.on("SIGINT",  () => { log("shutting down"); stopping = true; try { ws?.close(); } catch {} process.exit(0); });
-process.on("SIGTERM", () => { log("shutting down"); stopping = true; try { ws?.close(); } catch {} process.exit(0); });
+// Boot section: only auto-start when run as the tunnel process, so unit
+// tests can require this file for shouldRecycleTunnel without side effects.
+if (require.main === module) {
+  // Check backend health periodically
+  setInterval(checkBackendHealth, BACKEND_CHECK_INTERVAL);
+  // Initial check
+  checkBackendHealth();
+  // Stall watchdog (see above)
+  setInterval(checkTunnelStall, 10_000).unref();
 
-connect();
+  // Graceful shutdown
+  process.on("SIGINT",  () => { log("shutting down"); stopping = true; try { ws?.close(); } catch {} process.exit(0); });
+  process.on("SIGTERM", () => { log("shutting down"); stopping = true; try { ws?.close(); } catch {} process.exit(0); });
+
+  connect();
+}
+
+module.exports = { shouldRecycleTunnel, SEND_STALL_LIMIT, SEND_STALL_MS, SILENT_RECYCLE_MS };

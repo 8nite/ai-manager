@@ -60,6 +60,10 @@ function spawn(key, file, args, opts = {}) {
       try { res.write(`event: exit\ndata: ${JSON.stringify({ exitCode })}\n\n`); } catch {}
     }
   });
+  // Optional exit hook (e.g. harness resume fallback in sessions.js).
+  if (opts && typeof opts.onExit === "function") {
+    try { proc.onExit(opts.onExit); } catch {}
+  }
   return entry;
 }
 

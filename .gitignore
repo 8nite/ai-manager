@@ -2,3 +2,19 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# secrets & local state (never commit)
+.env
+*.env
+*.pem
+*.key
+data/
+*.tmp
+*.sock
+
+# generated indexes (rebuilt via graphify)
+graphify-out/
+memory/graphify-out/
+
+# infra manifests deploy via kubectl, not via this repo
+k8s/

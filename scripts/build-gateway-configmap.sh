@@ -16,7 +16,7 @@ for f in *.js; do
 done
 # gateway-admin wrapper (extensionless filename survives as the CM key).
 [ -e gateway-admin ] && build_args+=(--from-file="gateway-admin")
-for f in public/index.html public/login.html public/register.html public/styles.css; do
+for f in public/index.html public/login.html public/register.html public/gateway.css; do
   key="public_$(basename "$f" | tr '.' '_')"
   build_args+=(--from-file="$key=$f")
 done

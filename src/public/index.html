@@ -3,99 +3,319 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="AI Manager — local multi-harness session manager for opencode, droid and deepseek-harness.">
-<meta name="theme-color" content="#0b0e1a">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e1a'/%3E%3Cpath d='M16 5 27 16 16 27 5 16Z' fill='none' stroke='%232dd4bf' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%232dd4bf'/%3E%3C/svg%3E">
-<title>AI Manager</title>
+<meta name="description" content="AI Manager — local multi-harness mission control for opencode, droid, deepseek-harness, and agy.">
+<meta name="theme-color" content="#090a0f">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%2306b6d4'/%3E%3Cstop offset='100%25' stop-color='%233b82f6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='%23090a0f'/%3E%3Cpath d='M16 4.5 27.5 16 16 27.5 4.5 16Z' fill='none' stroke='url(%23g)' stroke-width='2.6' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%2306b6d4'/%3E%3C/svg%3E">
+<title>AI Manager · Mission Control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css?v=__AI_MGR_VERSION__">
 <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css">
 </head>
 <body>
 <div id="app">
+  <!-- TOPBAR / GLOBAL HEADER -->
   <header id="topbar">
-    <div class="logo"><span class="mark">◈</span> AI Manager</div>
-    <div class="top-actions">
-      <button id="btnPalette" title="Quick switcher (Ctrl+K)"><span class="kbd">⌃K</span></button>
-      <button id="btnOpenFolder" class="primary" title="Open a folder as a workspace">＋ Open folder</button>
-      <span id="healthDot" class="dot" title="server health"></span>
+    <div class="top-left">
+      <button id="btnSide" class="icon-btn" title="Toggle sidebar" aria-label="Toggle sidebar">
+        <svg viewBox="0 0 24 24" class="svg-icon"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="brand" id="brandHome" title="Return to Mission Control Dashboard">
+        <div class="brand-glyph">
+          <svg viewBox="0 0 24 24" class="svg-glyph">
+            <defs>
+              <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#06b6d4"/>
+                <stop offset="100%" stop-color="#3b82f6"/>
+              </linearGradient>
+            </defs>
+            <path d="M12 2.5 21.5 12 12 21.5 2.5 12Z" fill="none" stroke="url(#brandGrad)" stroke-width="2.2" stroke-linejoin="round"/>
+            <circle cx="12" cy="12" r="3" fill="#06b6d4"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">AI Manager</span>
+          <span class="brand-badge">MISSION CONTROL</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Search / Command Palette Bar -->
+    <div class="top-center">
+      <button id="btnPalette" class="search-trigger" title="Quick Switcher & Command Palette (Ctrl+K)">
+        <svg viewBox="0 0 24 24" class="svg-icon search-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span class="search-text">Search sessions, workspaces, actions...</span>
+        <div class="kbd-wrap">
+          <kbd class="kbd">Ctrl</kbd><kbd class="kbd">K</kbd>
+        </div>
+      </button>
+    </div>
+
+    <!-- Right Controls -->
+    <div class="top-right">
+      <div id="healthBadge" class="health-pill" title="System connection & health status">
+        <span id="healthDot" class="dot on"></span>
+        <span id="healthLabel">Connected</span>
+      </div>
+
+      <div id="harnessSwitch" class="harness-switch" role="radiogroup" aria-label="Default harness for new sessions" title="Default harness for new sessions">
+        <button type="button" class="hs-btn sel" data-harness="opencode" role="radio" aria-checked="true" title="opencode — Web IDE">opencode</button>
+        <button type="button" class="hs-btn" data-harness="droid" role="radio" aria-checked="false" title="droid — Autonomous CLI agent">droid</button>
+        <button type="button" class="hs-btn" data-harness="dsh" role="radio" aria-checked="false" title="dsh — DeepSeek CLI agent">dsh</button>
+        <button type="button" class="hs-btn" data-harness="agy" role="radio" aria-checked="false" title="agy — Antigravity CLI agent">agy</button>
+      </div>
+
+      <button id="btnNarrate" class="narrate-btn" title="Narrate session activity aloud (toggle)" aria-label="Toggle narrate mode" aria-pressed="false">
+        <svg viewBox="0 0 24 24" class="svg-icon"><path d="M3 9v6h4l5 5V4L7 9H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Narrate</span>
+      </button>
+
+      <button id="btnNewSessionTop" class="primary-btn" title="Launch a new AI agent session" aria-label="Launch a new AI agent session">
+        <svg viewBox="0 0 24 24" class="svg-icon"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        <span>New Session</span>
+      </button>
     </div>
   </header>
 
+  <!-- MIDDLE LAYOUT (SIDEBAR + MAIN STAGE) -->
   <div id="middle">
+    <!-- LEFT SIDEBAR -->
     <aside id="left">
-      <div class="panel-title">WORKSPACES</div>
-      <div id="wsList"></div>
+      <div class="sidebar-header">
+        <div class="sidebar-title-row">
+          <span id="sidebarCountPill" class="count-pill">0</span>
+        </div>
+        <!-- Filter Pills -->
+        <div class="filter-pills">
+          <button class="filter-pill active" data-filter="all">All</button>
+          <button class="filter-pill" data-filter="active">Active</button>
+          <button class="filter-pill" data-filter="waiting">Attention <span id="filterWaitCount" class="badge-mini hidden">0</span></button>
+        </div>
+      </div>
+
+      <!-- Priority Shelf: Sessions Needing Attention -->
+      <div id="attentionShelf" class="attention-shelf hidden"></div>
+
+      <!-- Workspaces & Sessions Tree -->
+      <div id="wsList" class="ws-list"></div>
+
+      <!-- Sidebar Footer -->
+      <div class="sidebar-footer">
+        <button id="btnSideOpen" class="sidebar-action-btn">
+          <svg viewBox="0 0 24 24" class="svg-icon"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+          <span>Open Folder</span>
+        </button>
+      </div>
     </aside>
 
+    <div id="sideResize" class="side-resize-handle" title="Drag horizontally to resize sidebar"></div>
+
+    <!-- CENTER MAIN STAGE -->
     <main id="center">
-      <div id="sessionBar">
-        <span id="sessionTitle">No session selected</span>
-        <span id="sessionMeta"></span>
-        <span class="spacer"></span>
-        <button id="btnEnsure" title="Restart backend if dead (resume)">↻ resume</button>
-        <button id="btnKill" title="Delete this session">✕</button>
+      <!-- Split-screen toolbar -->
+      <div id="paneBar" class="pane-bar">
+        <div class="pane-bar-left">
+          <span class="pane-bar-label">STAGE</span>
+          <span id="paneCount" class="count-pill" title="Open split panes">1</span>
+        </div>
+        <div class="pane-bar-right">
+          <button id="btnSplitCols" class="pane-btn" title="Split vertically — view two sessions side by side" aria-label="Split vertically">
+            <svg viewBox="0 0 24 24" class="svg-icon"><path d="M12 4v16M4 4h16v16H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+            <span>Split ║</span>
+          </button>
+          <button id="btnSplitRows" class="pane-btn" title="Split horizontally — stack two sessions" aria-label="Split horizontally">
+            <svg viewBox="0 0 24 24" class="svg-icon"><path d="M4 12h16M4 4h16v16H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+            <span>Split ═</span>
+          </button>
+          <button id="btnClosePane" class="pane-btn" title="Close the focused split pane" aria-label="Close split pane">
+            <svg viewBox="0 0 24 24" class="svg-icon"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <span>Close pane</span>
+          </button>
+        </div>
       </div>
+      <!-- Stage Viewports (split panes render here) -->
       <div id="stage">
-        <iframe id="webview" class="hidden" title="harness"></iframe>
-        <div id="termWrap" class="hidden"></div>
+        <div id="paneGrid" class="pane-grid"></div>
+
+        <!-- Empty State: Mission Control Dashboard -->
         <div id="emptyStage">
-          <div class="start-card">
-            <div class="start-mark">◈</div>
-            <h2>Open a folder to begin</h2>
-            <p>Each folder becomes a workspace. Inside it, spin up <b>opencode</b>, <b>droid</b> or <b>dsh</b> sessions and flip between them here.</p>
-            <button id="btnEmptyOpen" class="primary lg">＋ Open folder</button>
-            <div class="chips"><span>opencode · web</span><span>droid · terminal</span><span>dsh · web</span></div>
-            <p class="hints">Ctrl+K jumps anywhere · + on a workspace starts a session</p>
+          <div class="mission-dashboard">
+            <!-- Hero Section -->
+            <section class="dash-hero">
+              <div class="hero-badge">
+                <span class="hero-dot"></span> ORCHESTRATION HUB
+              </div>
+              <h1 class="hero-title">AI Agent Mission Control</h1>
+              <p class="hero-subtitle">Coordinate autonomous coding agents across local project folders. Monitor generation in real-time, handle tasks requiring review, and toggle between terminals and web IDEs.</p>
+              
+              <div class="hero-actions">
+                <button id="btnHeroNewSession" class="primary-btn hero-btn">
+                  <svg viewBox="0 0 24 24" class="svg-icon"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+                  <span>Launch Agent Session</span>
+                </button>
+                <button id="btnHeroOpenFolder" class="ghost-btn hero-btn">
+                  <svg viewBox="0 0 24 24" class="svg-icon"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+                  <span>Open Workspace Folder</span>
+                </button>
+              </div>
+
+              <!-- Harness Badges -->
+              <div class="harness-pills-row">
+                <span class="hpill opencode">
+                  <span class="hpill-dot"></span>
+                  <b>opencode</b> · Web IDE &amp; Diff Pair
+                </span>
+                <span class="hpill droid">
+                  <span class="hpill-dot"></span>
+                  <b>droid</b> · Autonomous CLI Agent
+                </span>
+                <span class="hpill dsh">
+                  <span class="hpill-dot"></span>
+                  <b>dsh</b> · DeepSeek CLI Agent
+                </span>
+                <span class="hpill agy">
+                  <span class="hpill-dot"></span>
+                  <b>agy</b> · Antigravity CLI Agent
+                </span>
+              </div>
+            </section>
+
+            <!-- Live Metrics Overview -->
+            <section class="dash-metrics" id="dashMetrics">
+              <div class="metric-card">
+                <div class="metric-label">TOTAL SESSIONS</div>
+                <div class="metric-value" id="mTotalSessions">0</div>
+                <div class="metric-sub" id="mBreakdown">0 web · 0 terminal</div>
+              </div>
+              <div class="metric-card highlight-working">
+                <div class="metric-label">ACTIVE / WORKING</div>
+                <div class="metric-value" id="mActiveWorking">0</div>
+                <div class="metric-sub">Generating or running</div>
+              </div>
+              <div class="metric-card highlight-waiting" id="mCardWaiting">
+                <div class="metric-label">NEEDS ATTENTION</div>
+                <div class="metric-value" id="mNeedsAttention">0</div>
+                <div class="metric-sub">Awaiting human input</div>
+              </div>
+              <div class="metric-card">
+                <div class="metric-label">WORKSPACES</div>
+                <div class="metric-value" id="mWorkspaces">0</div>
+                <div class="metric-sub">Active project directories</div>
+              </div>
+            </section>
+
+            <!-- Attention Required Feed -->
+            <section id="dashAttentionSection" class="dash-section hidden">
+              <div class="dash-section-header">
+                <div class="dash-section-title">
+                  <span class="pulse-spark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span> AGENTS AWAITING HUMAN INPUT
+                </div>
+                <span class="dash-section-sub">These sessions went quiet and likely require instructions or command approval</span>
+              </div>
+              <div id="dashAttentionList" class="dash-attention-grid"></div>
+            </section>
+
+            <!-- Workspaces Cards Grid -->
+            <section class="dash-section">
+              <div class="dash-section-header">
+                <div class="dash-section-title">ACTIVE WORKSPACES</div>
+                <span class="dash-section-sub">Open folders hosting your agent sessions</span>
+              </div>
+              <div id="dashGrid" class="dash-workspaces-grid"></div>
+            </section>
           </div>
         </div>
       </div>
     </main>
   </div>
 
+  <!-- BOTTOM DRAWER: CONSOLE / TERMINAL -->
   <footer id="bottom">
-    <div id="consoleTabs">
-      <span class="panel-title">CONSOLE</span>
-      <div id="conTabs"></div>
-      <button id="btnNewConsole" title="New console in the active workspace">＋</button>
-      <span class="spacer"></span>
-      <button id="btnCollapse" title="Collapse / expand">▾</button>
+    <div id="resizeHandle" class="resize-handle" title="Drag vertically to resize terminal drawer">
+      <div class="resize-pill"></div>
     </div>
-    <div id="consoleBody"><div id="conTermWrap"></div></div>
-    <div id="statusline"><span id="statusText">ready</span></div>
+    
+    <div id="consoleTabs" class="console-tabbar">
+      <div class="console-tabbar-left">
+        <div class="panel-tag">
+          <svg viewBox="0 0 24 24" class="svg-icon"><polyline points="4 17 10 11 4 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="19" x2="20" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span>TERMINAL</span>
+        </div>
+        <div id="conTabs" class="con-tabs"></div>
+        <button id="btnNewConsole" class="con-new-btn" title="Create a new terminal in the current workspace">
+          <svg viewBox="0 0 24 24" class="svg-icon"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span>New Terminal</span>
+        </button>
+      </div>
+
+      <div class="console-tabbar-right">
+        <button id="btnMaximizeConsole" class="icon-btn-sm" title="Maximize / Restore drawer" aria-label="Maximize or restore terminal drawer">
+          <svg viewBox="0 0 24 24" class="svg-icon"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button id="btnCollapse" class="icon-btn-sm" title="Collapse / Expand terminal" aria-label="Collapse or expand terminal">
+          <svg viewBox="0 0 24 24" class="svg-icon"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div id="consoleBody">
+      <div id="conTermWrap"></div>
+    </div>
+
+    
   </footer>
 </div>
 
-<div id="modal" class="hidden">
-  <div id="modalCard">
-    <h3 id="modalTitle">New session</h3>
-    <label>harness
-      <select id="fHarness">
-        <option value="opencode">opencode (web)</option>
-        <option value="droid">droid (terminal)</option>
-        <option value="dsh">dsh · deepseek-harness (web)</option>
-      </select>
-    </label>
-    <label>title <input id="fTitle" placeholder="optional"></label>
-    <div class="row">
-      <button id="fOk">create</button>
-      <button id="fCancel" class="ghost-btn">cancel</button>
+<!-- MODAL: OPEN FOLDER WORKSPACE -->
+<div id="folderModal" class="overlay hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <div class="modal-icon-badge folder-badge">
+          <svg viewBox="0 0 24 24" class="svg-icon"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </div>
+        <div>
+          <h3>Open Folder as Workspace</h3>
+          <p class="modal-sub">Add a local repository or directory to organize sessions.</p>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeFolderModal()" aria-label="Close dialog">✕</button>
+    </div>
+
+    <div class="modal-field">
+      <label for="fPath">Directory Path</label>
+      <input id="fPath" placeholder="/home/herbert/projects/my-app" autocomplete="off" spellcheck="false">
+      <p class="field-hint">Type to search directories — ↑↓ to navigate, Enter/Tab to pick.</p>
+    </div>
+
+    <div class="modal-actions">
+      <button id="fPathCancel" class="ghost-btn">Cancel</button>
+      <button id="fPathOk" class="primary-btn">Open Workspace</button>
     </div>
   </div>
 </div>
 
-<div id="palette" class="hidden">
-  <div id="palCard">
-    <input id="palInput" placeholder="jump to session, workspace, action…  (esc closes)" autocomplete="off" spellcheck="false">
-    <div id="palList"></div>
-    <div id="palHint">↑↓ navigate · enter open · ctrl+k toggle</div>
+<!-- COMMAND PALETTE / QUICK SWITCHER (CTRL+K) -->
+<div id="palette" class="overlay hidden">
+  <div id="palCard" class="pal-card">
+    <div class="pal-search-header">
+      <svg viewBox="0 0 24 24" class="svg-icon pal-search-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      <input id="palInput" placeholder="Jump to session, workspace, action... (Esc to close)" autocomplete="off" spellcheck="false">
+      <span class="pal-shortcut-badge"><kbd>ESC</kbd></span>
+    </div>
+    <div id="palList" class="pal-list"></div>
+    <div id="palHint" class="pal-footer">
+      <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+      <span><kbd>Enter</kbd> select</span>
+      <span><kbd>Ctrl+K</kbd> toggle</span>
+    </div>
   </div>
 </div>
 
+<!-- SCRIPTS -->
 <script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=__AI_MGR_VERSION__"></script>
 </body>
 </html>
