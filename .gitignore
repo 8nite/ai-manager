@@ -16,5 +16,8 @@ data/
 graphify-out/
 memory/graphify-out/
 
+# harness2 local runs + experience library (regenerable)
+harness2-work/
+
 # infra manifests deploy via kubectl, not via this repo
 k8s/

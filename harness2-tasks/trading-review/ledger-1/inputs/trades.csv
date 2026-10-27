@@ -1,0 +1,4 @@
+ticker,side,shares,price
+NVDA,BUY,100,180.00
+NVDA,SELL,40,187.50
+TSLA,BUY,50,240.00
