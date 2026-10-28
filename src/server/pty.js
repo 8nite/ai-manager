@@ -53,9 +53,15 @@ function spawn(key, file, args, opts = {}) {
       }
     }
   });
-  proc.onExit(({ exitCode }) => {
+  proc.onExit(({ exitCode, signal }) => {
     entry.exited = true;
     entry.exitCode = exitCode;
+    // Diagnose silent deaths (e.g. agy exiting 1 on remote paste): the
+    // terminal banner shows only the code, so log the backlog tail here.
+    try {
+      const tail = (entry.backlog || "").slice(-500).replace(/\s+/g, " ").slice(-500);
+      process.stderr.write(`[pty] ${key} exited code=${exitCode} signal=${signal || "-"} backlogTail=${JSON.stringify(tail)}\n`);
+    } catch {}
     for (const res of [...entry.subs]) {
       try { res.write(`event: exit\ndata: ${JSON.stringify({ exitCode })}\n\n`); } catch {}
     }
@@ -87,6 +93,16 @@ function ensure(key, file, args, opts) {
 function write(key, data) {
   const e = pool.get(key);
   if (!e || e.exited) return false;
+  // Paste diagnosis (gated — off by default): multi-char inputs are pastes
+  // (keystrokes arrive 1 char per POST). Escapes shown as \uXXXX so
+  // bracketed-paste markers / C0 controls are visible without dumping raw
+  // bytes. Enable with AI_MGR_DEBUG_PTY=1, reproduce, then disable.
+  if (process.env.AI_MGR_DEBUG_PTY && String(data || "").length > 1) {
+    try {
+      const s = String(data);
+      process.stderr.write(`[pty] ${key} input len=${s.length} preview=${JSON.stringify(s.slice(0, 160))}\n`);
+    } catch {}
+  }
   try { e.proc.write(data); return true; } catch { return false; }
 }
 

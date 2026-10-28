@@ -1,7 +1,7 @@
 ---
 name: harness2-local
 description: harness2 running locally on installed opencode binary + current session model, no Google services (2026-10-24)
-date_modified: 2026-10-24
+date_modified: 2026-10-27
 tags: [harness2, opencode, opencode-go, recursion, no-vertex]
 links: [[opencode-v2-web]], [[harness-lifecycle]], [[MEMORY]]
 ---
@@ -65,6 +65,13 @@ removes all three requirements:
   lines via `autotrigger`, 3 full skills + index, docs-manager subagent,
   `scripts/gmail_app.py` at root for the cross-skill doc ref), library at
   `harness2-work/library/` (gitignored), runs under `harness2-work/runs/`.
+- This repo's `./memory` is baked into every harness2 run as always-on
+  `LongTermMEMORY.md` (~19.8 KB: `MEMORY.md` index + topic files, truncated
+  to the 24 K base-harness cap). Every rollout workspace gets it two ways:
+  staged file + inlined in its composed `AGENTS.md` — solver rollouts and
+  improver/composer sessions all see it. Untracked `harness2-work/` (runs,
+  library, promoted) stays out of the repo; the experience library is the
+  only cross-task memory that threads forward.
 - nightly-brief/brief-1: INV kept base with evidence; DOM proposed a real
   `skills/nightly-brief/SKILL.md` + `calc_brief.py`, probed it; AGG
   composer dropped both (base already correct) → adopted base. Honest
@@ -72,9 +79,20 @@ removes all three requirements:
 - trading-review/ledger-1: all KEEP_BASE, base delivered correct summary.
 - Scores: 5/5 and 7/7 (one CHECKS needle fixed: `77580` → `77,580`,
   prompt asks for thousands separators — check bug, not deliverable bug).
-- Library empty by upstream design: k=1 selection is trivial (single
-  final, no selector session) so no evidence-supported lesson is stored.
-  k=2 would yield multi-final selection + library entries (~2x calls).
+## k=2 adaptation (2026-10-26, both tasks ok, EXIT 0)
+
+- 8 rollouts + 6 improver sessions per task, non-trivial selection both
+  domains (agg1 over agg2 with genuine conformance reasons: header-casing
+  rule once, plainest-form tiebreak once). Adopted trees are non-base.
+- Chosen runs score 5/5 and 7/7 on CHECKS.
+- Reflection ran and correctly returned NO_ENTRY both domains: all 8
+  deliverables numerically identical everywhere, so no execution contrast
+  isolates any edit — the method refused to fabricate a lesson. Library
+  stays empty BY DESIGN, not by failure.
+- Lesson: tasks lack headroom — base already solves them perfectly, so
+  probes can't diverge. Library entries need tasks where base FAILS
+  (ambiguous data, bigger books, multi-step checks where skills change
+  behavior). Next: harder task v2, then re-run one domain.
 - Next step (not done): thin judge via `harness2-judge` on the namespace.
 
 ## Auto-use on new sessions (2026-10-24, shipped, default off)

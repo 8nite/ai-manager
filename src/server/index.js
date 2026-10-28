@@ -55,8 +55,6 @@ app.get("/api/state", async (_req, res) => {
   // never fails the route. Titles + activity run concurrently (not in
   // series) so one slow backend stalls the poll once, not twice.
   try { await Promise.all([sessions.syncAllSessionTitles(), sessions.syncAllWebActivity(1500)]); } catch {}
-  // Opencode PTY chat-id backfill runs in the background (never blocks the poll).
-  try { sessions.backfillOpencodeIds().catch(() => {}); } catch {}
   res.json({
     workspaces: store.getWorkspaces(),
     sessions: store.getSessions().map(sessions.describeSession),
@@ -116,8 +114,6 @@ app.post("/api/sessions", async (req, res) => {
 
 app.get("/api/sessions", async (_req, res) => {
   try { await Promise.all([sessions.syncAllSessionTitles(), sessions.syncAllWebActivity(1500)]); } catch {}
-  // Opencode PTY chat-id backfill runs in the background (never blocks the poll).
-  try { sessions.backfillOpencodeIds().catch(() => {}); } catch {}
   res.json(store.getSessions().map(sessions.describeSession));
 });
 

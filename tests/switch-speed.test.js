@@ -68,9 +68,9 @@ test("switch-speed: narration observes synchronously, never after awaited work",
   // intent; the iframe load handler re-targets on the real document commit.
   const { i } = fnBody("setPaneSession");
   // Window covers the whole switch flow incl. the client-side nav lane and
-  // the completion block (widened 6000→8000 when the lane landed, 2026-10-13;
-  // the asserts below are unchanged).
-  const win = js.slice(i, i + 8000);
+  // the completion block (widened 6000→8000 when the lane landed, 8000→8600
+  // for the stuck-gate try/finally, 2026-10-27; the asserts below unchanged).
+  const win = js.slice(i, i + 8600);
   const early = win.indexOf("observeActivePane();\n\n  const s = state.sessions.find");
   assert.ok(early !== -1, "setPaneSession must observe right after paint, before session lookup");
   const firstAwait = win.indexOf("await ");
@@ -131,4 +131,47 @@ test("switch-speed: row-click switch skips the optimistic paint when the nav lan
   const win = js.slice(i, js.indexOf("async function setPaneSession", i));
   assert.ok(win.includes("clientSwitchFrame(pane, pre)"), "activateSession must probe lane eligibility pre-paint");
   assert.ok(win.includes("if (!navFirst) paintPane(pane)"), "optimistic paint must be skipped for the nav lane");
+});
+
+test("switch-speed: seamless opencode switch syncs window tabs and verifies warm routes without reload", () => {
+  // Regression: opencode's client message store (y.run("session.message:" + hid))
+  // is a one-shot cache (and SSE session.created marks new chats complete), so
+  // switching back to a visited chat or to a newly created chat makes ZERO
+  // repeat /message fetches. Waiting only for a new /message fetch timed out
+  // after 6s, fell through to paintPane, and spawned a brand-new <iframe>
+  // (quitting + re-initializing the opencode window).
+  assert.ok(js.includes("function syncOpencodeTabs()"), "syncOpencodeTabs helper must exist");
+  assert.ok(js.includes("opencode.window.browser.dat:tabs"), "must seed opencode window tabs store");
+  assert.ok(js.includes("opencode.window.browser.dat:tabs.info"), "must seed opencode window tabs.info store");
+  assert.ok(js.includes("function isSpaRoutedTo("), "DOM/resource route verifier must exist");
+  assert.ok(js.includes("data-titlebar-tab-slot") && js.includes("data-slot=\"tab-link\""),
+    "must use opencode's native tab-link + active-tab slot for warm switches");
+  const pp = js.slice(js.indexOf("function paintPane"), js.indexOf("function isFrameCached"));
+  assert.ok(pp.includes("clientSwitchFrame(p, s)"),
+    "paintPane must reuse a live same-port frame instead of creating a second iframe");
+  const vf = js.slice(js.indexOf("function visibleWebFrame"), js.indexOf("function clientSwitchFrame"));
+  assert.ok(vf.includes("pane._frameCache"), "visibleWebFrame must recover cached frame after PTY detour");
+});
+
+test("switch-speed: fresh chats fast-accept without the 6s verify", () => {
+  // New-session pain: a just-created chat was never fetched in the live
+  // document and has no tab link yet, so strict-only verify (fresh fetch /
+  // active tab) burned the full ~6s and fell back to a second document —
+  // the blank-iframe + loader gap. clientSwitchSession must detect the fresh
+  // case (zero prior resource entries for the hid) and settle-accept on
+  // route-hold + mounted chat well under the strict deadline.
+  const i = js.indexOf("async function clientSwitchSession");
+  assert.ok(i !== -1, "missing clientSwitchSession");
+  const win = js.slice(i, js.indexOf("function retargetFrameCache"));
+  assert.ok(win.includes("isFresh"), "fresh-chat lane missing");
+  assert.ok(/seen === 0 && seenSess === 0/.test(win), "fresh must mean zero prior fetches for the hid");
+  assert.ok(win.includes("freshDeadline"), "fresh lane needs its own shorter cap");
+  assert.ok(win.includes("settled"), "fresh accept must sustain across a short settle (stale panels swap out)");
+  assert.ok(win.includes("Unrecognised route!"), "fresh settle must still reject bad routes");
+  assert.ok(win.includes("session-chat-panel") && win.includes("session-composer-dock"),
+    "fresh settle must require a mounted chat view");
+  // Strict lane intact for visited chats: full timeout + fetch/tab-link verify.
+  assert.ok(/Date\.now\(\) > \(isFresh \? freshDeadline : deadline\)/.test(win),
+    "visited chats must keep the full strict deadline");
+  assert.ok(win.includes("isSpaRoutedTo(w, hid, seen, seenSess)"), "strict fetch/tab-link verify must stay");
 });

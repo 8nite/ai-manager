@@ -505,6 +505,38 @@ kbd, .kbd {
   margin-bottom: 6px;
   padding: 2px 4px;
 }
+/* Collapsible Needs Attention: header is a toggle button; collapsed keeps
+   the header (with count) and hides the cards. */
+.shelf-header.shelf-toggle {
+  width: 100%;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.shelf-header.shelf-toggle:hover { background: rgba(245, 158, 11, 0.08); border-radius: 6px; }
+.shelf-header.shelf-toggle:focus-visible { outline: 2px solid var(--status-waiting); outline-offset: 1px; border-radius: 6px; }
+.attention-shelf.collapsed .shelf-header { margin-bottom: 0; }
+.attention-shelf.collapsed .caret { transform: rotate(-90deg); }
+.attention-shelf.collapsed .shelf-card { display: none; }
+/* Collapsible dashboard attention feed (shares the shelf toggle state). */
+.dash-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: fit-content;
+  max-width: 100%;
+}
+.dash-section-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+#dashAttentionSection.collapsed #dashAttentionList { display: none; }
+#dashAttentionSection.collapsed .caret { transform: rotate(-90deg); }
 .shelf-card {
   background: var(--bg-2);
   border: 1px solid rgba(245, 158, 11, 0.3);

@@ -147,10 +147,15 @@ function injectNoTitlebar(html) {
 // (handled by explicitMiddleware, no cookie needed). Assets are identical
 // across same-version backends, so scoping them too is harmless.
 // Runs before app scripts (same gate as the route shim); own CSP sha256.
+// NB: the XHR.open wrapper MUST re-dispatch with the caller's original
+// arity. Forwarding explicit `undefined` for a missing `async` flips the
+// request to sync in Chrome, so any later `responseType=` throws
+// ("...cannot be changed for synchronous requests...") — this broke file
+// uploads (opencode POSTs octet-stream via XHR + responseType=json).
 function apiScopeBodyFor(mgrSessionId) {
   const safe = String(mgrSessionId || "").replace(/[^A-Za-z0-9_-]/g, "");
   if (!safe) return null;
-  return '/*aimgr-api-scope*/(function(){try{var P="/s/' + safe + '";function R(u){try{var x=new URL(u,location.href);if(x.origin!==location.origin)return null;var p=x.pathname||"/";if(p.indexOf(P+"/")===0)return null;if(p==="/s"||p.indexOf("/s/")===0)return null;if(p.indexOf("/harness/")===0)return null;x.pathname=P+p;return x.toString()}catch(e){return null}}function RI(i){if(typeof i==="string")return R(i)||i;try{if(i instanceof Request){var n=R(i.url);if(n)return new Request(n,i)}}catch(e){}return i}var OF=window.fetch;window.fetch=function(i,t){try{i=RI(i)}catch(e){}return OF.call(this,i,t)};var OO=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u,a,s,w){try{var n=R(u);if(n)u=n}catch(e){}return OO.call(this,m,u,a,s,w)};if(window.EventSource){var OE=window.EventSource;window.EventSource=function(u,o){try{var n=R(u);if(n)u=n}catch(e){}return new OE(u,o)};window.EventSource.prototype=OE.prototype}if(window.WebSocket){var OW=window.WebSocket;window.WebSocket=function(u,r){try{var s=String((u&&u.toString)?u.toString():u);try{var x=new URL(s,location.href);if(x.host===location.host&&(x.protocol==="ws:"||x.protocol==="wss:"||x.protocol==="http:"||x.protocol==="https:")){var p=x.pathname||"/";if(p.indexOf(P+"/")!==0&&p!=="/s"&&p.indexOf("/s/")!==0&&p.indexOf("/harness/")!==0){x.pathname=P+p;s=x.toString()}}}catch(e){var q=R(s);if(q)s=q}u=s}catch(e){}return r!==undefined?new OW(u,r):new OW(u)};window.WebSocket.prototype=OW.prototype}}catch(e){}}())';
+  return '/*aimgr-api-scope*/(function(){try{var P="/s/' + safe + '";function GP(){try{var d=window.frameElement&&window.frameElement.dataset&&window.frameElement.dataset.sess;if(d&&/^[A-Za-z0-9_-]+$/.test(d))return"/s/"+d}catch(e){}return P}function R(u){try{var cp=GP();var x=new URL(u,location.href);if(x.origin!==location.origin)return null;var p=x.pathname||"/";if(p.indexOf(cp+"/")===0)return null;if(p==="/s"||p.indexOf("/s/")===0)return null;if(p.indexOf("/harness/")===0)return null;x.pathname=cp+p;return x.toString()}catch(e){return null}}function RI(i){if(typeof i==="string")return R(i)||i;try{if(i instanceof Request){var n=R(i.url);if(n)return new Request(n,i)}}catch(e){}return i}var OF=window.fetch;window.fetch=function(i,t){try{i=RI(i)}catch(e){}return OF.call(this,i,t)};var OO=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{var n=R(u);if(n)u=n}catch(e){}var l=arguments.length;if(l<=2)return OO.call(this,m,u);if(l===3)return OO.call(this,m,u,arguments[2]);if(l===4)return OO.call(this,m,u,arguments[2],arguments[3]);return OO.call(this,m,u,arguments[2],arguments[3],arguments[4])};if(window.EventSource){var OE=window.EventSource;window.EventSource=function(u,o){try{var n=R(u);if(n)u=n}catch(e){}return new OE(u,o)};window.EventSource.prototype=OE.prototype}if(window.WebSocket){var OW=window.WebSocket;window.WebSocket=function(u,r){try{var cp=GP();var s=String((u&&u.toString)?u.toString():u);try{var x=new URL(s,location.href);if(x.host===location.host&&(x.protocol==="ws:"||x.protocol==="wss:"||x.protocol==="http:"||x.protocol==="https:")){var p=x.pathname||"/";if(p.indexOf(cp+"/")!==0&&p!=="/s"&&p.indexOf("/s/")!==0&&p.indexOf("/harness/")!==0){x.pathname=cp+p;s=x.toString()}}}catch(e){var q=R(s);if(q)s=q}u=s}catch(e){}return r!==undefined?new OW(u,r):new OW(u)};window.WebSocket.prototype=OW.prototype}}catch(e){}}())';
 }
 
 function injectApiScope(html, mgrSessionId) {
@@ -476,8 +481,23 @@ function proxyRequest(req, res, target, subPath, opts) {
 
 // Express middleware for /harness/* and /s/* (mounted at root; checks prefix).
 function explicitMiddleware(req, res, next) {
-  const r = resolveFromUrl(req.url);
+  let r = resolveFromUrl(req.url);
   if (!r) return next();
+  if (r.error === 404) {
+    // Shared-SPA resilience: if the session that originally booted the
+    // iframe was later deleted after the pane client-switched to another
+    // session, long-lived sub-resources (e.g. a reconnecting /api/event SSE
+    // stream) still carry the old /s/<deleted>/* prefix. Fall back to the
+    // active session's backend for sub-resources instead of 404ing.
+    const m = /^(\/harness\/|\/s\/)([^/]+)(\/.+)$/.exec(req.url.split("?")[0]);
+    const sub = m && m[3];
+    if (sub && sub !== "/") {
+      const cookies = parseCookies(req);
+      const activeSess = cookies.aimgr_active ? sessionById(cookies.aimgr_active) : null;
+      const t = targetForSession(activeSess);
+      if (t) r = { sess: activeSess, target: t, subPath: sub, focus: false };
+    }
+  }
   if (r.error) {
     res.writeHead(r.error, { "Content-Type": "text/plain" });
     return res.end(r.message);

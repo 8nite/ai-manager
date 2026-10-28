@@ -1,7 +1,7 @@
 ---
 name: prod-web-testing
 description: How ai-manager prod web (ai-manager.nexvision.cc) was tested end-to-end via browser automation
-date_modified: 2026-10-09
+date_modified: 2026-10-23
 tags: [ai-manager, prod, webauthn, gateway, agent-browser, testing]
 links: [[opencode-v2-web]], [[manager-proxy-remote]], [[browser-automation]]
 ---
@@ -79,3 +79,32 @@ above whenever the profile is fresh — treat as environment, not product bug.
 Local proxy matrix (§6) all green without login: `/harness/:id/api/info` 200,
 root `/api/event` SSE proxied with cookie, direct backends 401, opencode via
 proxy 200.
+
+## Public gateway smoke check (no login, 2026-10-23)
+
+Lightweight regression for `https://ai-manager.nexvision.cc` — needs no
+passkey, safe to run anytime (add to any e2e/regression pass touching prod):
+
+1. `curl -s -m 10 -o /dev/null -w "%{http_code}" https://ai-manager.nexvision.cc/` → 200
+2. `curl -s -m 10 https://ai-manager.nexvision.cc/health` → JSON with
+   `"status":"ok"`, `"tunnelConnected":true`, `tunnels >= 1` (active tunnel
+   `ready:true`). `scripts/ai-tunnel-health.sh` does the raw fetch; assert
+   the two fields rather than eyeballing.
+3. Cert: `openssl s_client -connect ai-manager.nexvision.cc:443
+   -servername ai-manager.nexvision.cc | openssl x509 -noout -dates`
+   (LE, renewed ~quarterly).
+4. If unhealthy: `journalctl --user -u ai-manager-tunnel.service` (flapping
+   `handshake timed out / DOWN (1006)` = gateway unreachable, client is fine)
+   + `kubectl -n nexvision get pods -l app=ai-manager-gateway`.
+
+## Transient TLS stall (2026-10-23, self-recovered)
+
+~07:19–07:22 EDT: TCP:443 connected but no ServerHello (curl `000` after
+10s on both :80 and :443); tunnel client logged repeated `Opening
+handshake has timed out / DOWN (1006)`; `kubectl` to the VPS `:6443` also
+TLS-timed-out. Recovered on its own — `tunnel UP` 07:22:30, gateway
+`/health` green (`tunnelConnected:true`), pod `Running` (13d, 1 restart).
+Sibling `opencode.nexvision.cc` (same VPS IP) answered 200 mid-incident, so
+not a full host outage — treat as transient ingress/network-path blip.
+Regression rule: a lone failed probe means nothing; only two consecutive
+failures ≥60s apart (plus tunnel journal showing flaps) count as prod-down.

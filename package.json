@@ -1,6 +1,6 @@
 {
   "name": "ai-manager",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Local multi-harness AI session manager (opencode, droid, deepseek-harness, agy) with a futuristic web UI and optional tunnel to ai-manager.nexvision.cc",
   "license": "MIT",
   "private": true,

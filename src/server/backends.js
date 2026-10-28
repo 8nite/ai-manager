@@ -14,15 +14,20 @@ const BASE_PORT = parseInt(process.env.AI_MGR_HARNESS_BASE_PORT || "4100", 10);
 const HARNESSES = {
   opencode: {
     label: "opencode",
-    mode: "pty",
+    mode: "web",
     bin: () => process.env.OPENCODE_BIN || "opencode",
-    // TUI in the manager terminal (like droid/agy). Resume: `--session
-    // <id>` continues that exact chat (same store the old serve backend
-    // used, so pre-migration web chats carry over via harnessSessionId).
-    // A bad id creates a fresh chat under it — never another session's.
-    // No global `--continue`: that would resume another workspace's chat.
-    args: (resumeId) => (resumeId ? ["--session", String(resumeId)] : []),
-    env: () => ({}),
+    args: (port) => ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
+    waitPath: "/",
+    // Stable manager-held password so the iframe auto-connects without a
+    // manual server picker. Proxy injects it upstream (see proxy.js).
+    // ponytail: single shared secret, not per-session — rotation = restart.
+    env: () => {
+      try {
+        return { OPENCODE_SERVER_PASSWORD: require("./opencodeAuth").getPassword() };
+      } catch {
+        return {};
+      }
+    },
   },
   dsh: {
     label: "deepseek-harness",
@@ -61,7 +66,7 @@ const HARNESSES = {
     label: "agy",
     mode: "pty",
     // Antigravity CLI (`agy`) interactive TUI in a PTY (xterm.js), like droid.
-    // Default model is the cheap flash-low tier; override with AGY_MODEL.
+    // Default model is flash-high tier; override with AGY_MODEL.
     // Full argv override via AGY_BIN / AGY_ARGS.
     // Resume: `--conversation <id>` when we know the harness conversation id,
     // else `--continue` (global most-recent — see ptyArgsFor) or plain `agy`.
@@ -70,7 +75,7 @@ const HARNESSES = {
     bin: () => process.env.AGY_BIN || "agy",
     args: (resumeId) => {
       if (process.env.AGY_ARGS) return process.env.AGY_ARGS.split(" ").filter(Boolean);
-      const a = ["--model", process.env.AGY_MODEL || "gemini-3.8-flash-low"];
+      const a = ["--model", process.env.AGY_MODEL || "gemini-3.8-flash-high"];
       if (resumeId) a.push("--conversation", String(resumeId));
       return a;
     },

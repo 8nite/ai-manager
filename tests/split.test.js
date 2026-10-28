@@ -157,3 +157,32 @@ test("split: programmatic focus sticks despite stale iframe DOM focus", () => {
   assert.ok(fn.includes("ae.blur()"), "focusPane must release stale iframe focus");
   assert.ok(fn.includes("ownerPid !== pid"), "blur must spare the target pane's own iframe");
 });
+
+test("split: failed switch must not freeze the sidebar gate", () => {
+  // setPaneSession flags switchingIds mid-switch so the 8s refresh skips
+  // re-rendering the sidebar (no flicker, stable click targets). If the
+  // flag survives a failed switch (rejected ensure, sync throw), every
+  // later refresh skips the sidebar and rows never render again — the
+  // whole left panel freezes. The gate must clear in a finally, guarded
+  // by seq so a stale switch never clears a newer switch's flag early.
+  const fn = js.slice(js.indexOf("async function setPaneSession"), js.indexOf("// POST terminal input"));
+  assert.ok(fn.includes("state.switchingIds.add(pane.pid)"), "switch must flag the gate");
+  assert.ok(fn.includes("finally"), "switch must clear the gate in a finally");
+  const fin = fn.slice(fn.indexOf("finally"));
+  assert.ok(fin.includes("pane.seq === my"), "finally must only clear the current switch");
+  assert.ok(fin.includes("state.switchingIds.delete(pane.pid)"), "finally must drop the flag");
+  assert.ok(fin.includes("syncLegacyActive()"), "finally must recompute the legacy alias");
+});
+
+test("split: rapid re-activate of the same session does not double-switch", () => {
+  // Double-click fires two activates for one session: without a guard the
+  // pane boots two concurrent ensures + iframe loads for an identical end
+  // state (double backend load and frame churn). A second setPaneSession
+  // for the pane's current session while its switch is still flagged must
+  // just focus the pane and return.
+  const fn = js.slice(js.indexOf("async function setPaneSession"), js.indexOf("// POST terminal input"));
+  assert.ok(fn.includes("pane.sessionId === id && state.switchingIds.has(pane.pid)"), "switch must detect the in-flight duplicate");
+  const guard = fn.slice(0, fn.indexOf("const my = ++activateSeq"));
+  assert.ok(guard.includes("focusPane(pane.pid)"), "duplicate switch must keep pane focus");
+  assert.ok(guard.includes("return"), "duplicate switch must not start backend work");
+});

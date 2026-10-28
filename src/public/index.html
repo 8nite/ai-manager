@@ -208,9 +208,12 @@
             <!-- Attention Required Feed -->
             <section id="dashAttentionSection" class="dash-section hidden">
               <div class="dash-section-header">
-                <div class="dash-section-title">
-                  <span class="pulse-spark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span> AGENTS AWAITING HUMAN INPUT
-                </div>
+                <button class="dash-section-toggle" id="dashAttentionToggle" aria-expanded="true" aria-controls="dashAttentionList" title="Collapse section">
+                  <span class="caret" aria-hidden="true">▼</span>
+                  <span class="dash-section-title">
+                    <span class="pulse-spark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span> AGENTS AWAITING HUMAN INPUT
+                  </span>
+                </button>
                 <span class="dash-section-sub">These sessions went quiet and likely require instructions or command approval</span>
               </div>
               <div id="dashAttentionList" class="dash-attention-grid"></div>

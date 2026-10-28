@@ -423,6 +423,48 @@ test("sessions: syncSessionTitle keeps the default title when no user messages e
   }
 });
 
+test("sessions: startWeb adopts a surviving backend instead of respawning", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-adopt-${Date.now()}.json`));
+  sessions._resetSharedForTest();
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url === "/api/info") res.end(JSON.stringify({ pid: 12345 }));
+      else if (req.url === "/api/session/ses_keepalive1") res.end(JSON.stringify({ data: { id: "ses_keepalive1" } }));
+      else res.end(JSON.stringify({ data: [] }));
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_adopt1", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port, status: "starting", harnessSessionId: "ses_keepalive1",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    // Opencode sessions route through the shared backend: point it at the
+    // stub so adopt (not spawn) is exercised.
+    const prevShared = process.env.AI_MGR_SHARED_PORT;
+    process.env.AI_MGR_SHARED_PORT = String(port);
+    try {
+      const { getHarness } = require("../src/server/backends");
+      await sessions.startSession("sess_adopt1");
+    } finally {
+      if (prevShared === undefined) delete process.env.AI_MGR_SHARED_PORT;
+      else process.env.AI_MGR_SHARED_PORT = prevShared;
+      sessions._resetSharedForTest();
+    }
+    const rec = sessions.sessionById("sess_adopt1");
+    assert.equal(rec.status, "running");
+    assert.equal(rec.backendPid, 12345);
+    assert.equal(sessions.webProcCount(), 0, "adopt must not spawn a child");
+  } finally {
+    srv.close();
+  }
+});
+
 test("sessions: tryAdoptBackend refuses closed ports and reclaims stale occupants", async () => {
   const http = require("http");
   const { spawn } = require("child_process");
@@ -689,7 +731,7 @@ test("sessions: agy spawns via AGY_BIN with model + resume argv", async () => {
     await sessions.startSession("sess_agy1");
     let alive = pty.get("session:sess_agy1");
     assert.ok(alive && !alive.exited, "agy PTY alive");
-    await argvSeen("--model gemini-3.8-flash-low");
+    await argvSeen("--model gemini-3.8-flash-high");
     sessions.killSession("sess_agy1");
     try { fs.unlinkSync(argvFile); } catch {}
     // Respawns continue; explicit conversation ids win.
@@ -701,7 +743,7 @@ test("sessions: agy spawns via AGY_BIN with model + resume argv", async () => {
     await sessions.startSession("sess_agy2");
     alive = pty.get("session:sess_agy2");
     assert.ok(alive && !alive.exited, "agy respawn PTY alive");
-    await argvSeen("--model gemini-3.8-flash-low --continue");
+    await argvSeen("--model gemini-3.8-flash-high --continue");
     sessions.killSession("sess_agy2");
     try { fs.unlinkSync(argvFile); } catch {}
     store.addSession({
@@ -712,7 +754,7 @@ test("sessions: agy spawns via AGY_BIN with model + resume argv", async () => {
     await sessions.startSession("sess_agy3");
     alive = pty.get("session:sess_agy3");
     assert.ok(alive && !alive.exited, "agy explicit-resume PTY alive");
-    await argvSeen("--model gemini-3.8-flash-low --conversation conv-xyz");
+    await argvSeen("--model gemini-3.8-flash-high --conversation conv-xyz");
     sessions.killSession("sess_agy3");
   } finally {
     if (prevBin === undefined) delete process.env.AGY_BIN;
@@ -780,36 +822,43 @@ test("sessions: sharedPort defaults to HARNESS_BASE-10, honors override", () => 
 });
 
 test("sessions: opencode creates share one backend port with zero child spawn", async () => {
-  // Header is historical (shared-serve era): opencode now spawns one TUI
-  // per session (pty mode). Same creation path, new contract below.
-  const pty = require("../src/server/pty");
-  store._resetForTest(path.join(os.tmpdir(), `aimgr-ocpty-${Date.now()}.json`));
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-shared-${Date.now()}.json`));
   sessions._resetSharedForTest();
-  const prevBin = process.env.OPENCODE_BIN;
-  process.env.OPENCODE_BIN = "true"; // exits immediately; spawn path only
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (req.url === "/api/info") res.end(JSON.stringify({ pid: 424242 }));
+        else if (req.method === "POST" && req.url === "/api/session") res.end(JSON.stringify({ data: { id: `ses_stub${seen.length}` } }));
+        else if (req.url === "/api/session/active") res.end(JSON.stringify({ data: {} }));
+        else res.end(JSON.stringify({ data: { id: "x" } }));
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
   const prevShared = process.env.AI_MGR_SHARED_PORT;
-  process.env.AI_MGR_SHARED_PORT = "49999";
-  let a = null, b = null;
+  process.env.AI_MGR_SHARED_PORT = String(srv.address().port);
   try {
     const ws = sessions.createWorkspace(os.tmpdir());
-    a = await sessions.createSession(ws.id, "opencode", "first");
-    b = await sessions.createSession(ws.id, "opencode", "second");
-    assert.equal(a.mode, "pty");
-    assert.equal(a.port, null);
-    assert.equal(b.port, null);
+    const a = await sessions.createSession(ws.id, "opencode", "first");
+    const b = await sessions.createSession(ws.id, "opencode", "second");
+    assert.equal(a.port, srv.address().port);
+    assert.equal(b.port, srv.address().port);
     assert.equal(a.status, "running");
     assert.equal(b.status, "running");
-    assert.equal(a.harnessSessionId, null, "fresh TUI owns no server chat yet");
-    assert.ok(pty.get(`session:${a.id}`), "pty spawned for first");
-    assert.ok(pty.get(`session:${b.id}`), "pty spawned for second");
+    assert.ok(a.harnessSessionId && b.harnessSessionId, "chats pre-created");
+    assert.notEqual(a.harnessSessionId, b.harnessSessionId, "distinct chats");
+    assert.equal(sessions.webProcCount(), 0, "shared adopt must not spawn children");
   } finally {
-    if (prevBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = prevBin;
     if (prevShared === undefined) delete process.env.AI_MGR_SHARED_PORT;
     else process.env.AI_MGR_SHARED_PORT = prevShared;
     sessions._resetSharedForTest();
-    try { if (a) pty.kill(`session:${a.id}`); } catch {}
-    try { if (b) pty.kill(`session:${b.id}`); } catch {}
+    srv.close();
   }
 });
 
@@ -1034,101 +1083,5 @@ test("sessions: prewarmSessionConfig fills the proxy config cache over loopback"
   } finally {
     proxy._clearConfigCacheForTest();
     srv.close();
-  }
-});
-
-test("sessions: legacy web opencode migrates to pty keeping its chat id", async () => {
-  const pty = require("../src/server/pty");
-  const os = require("os");
-  const path = require("path");
-  const fs = require("fs");
-  store._resetForTest(path.join(os.tmpdir(), `aimgr-ocmigrate-${Date.now()}.json`));
-  sessions._resetSharedForTest();
-  const fakeBin = path.join(os.tmpdir(), `fake-opencode-${Date.now()}.sh`);
-  fs.writeFileSync(fakeBin, "#!/bin/bash\nsleep 30\n");
-  fs.chmodSync(fakeBin, 0o755);
-  const prevBin = process.env.OPENCODE_BIN;
-  process.env.OPENCODE_BIN = fakeBin;
-  const prevShared = process.env.AI_MGR_SHARED_PORT;
-  process.env.AI_MGR_SHARED_PORT = "49998";
-  try {
-    const ws = sessions.createWorkspace(os.tmpdir());
-    store.addSession({
-      id: "sess_legacyweb", workspaceId: ws.id, harness: "opencode",
-      title: "opencode · legacy", mode: "web", port: 49998, status: "running",
-      harnessSessionId: "ses_carryover", createdAt: Date.now(), lastActiveAt: Date.now(),
-    });
-    const s = await sessions.startSession("sess_legacyweb");
-    assert.equal(s.mode, "pty");
-    assert.equal(s.port, null);
-    assert.equal(s.harnessSessionId, "ses_carryover", "TUI --session continues the old chat");
-    assert.equal(s.status, "running");
-    const entry = pty.get("session:sess_legacyweb");
-    assert.ok(entry && !entry.exited, "pty spawned for migrated session");
-  } finally {
-    if (prevBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = prevBin;
-    if (prevShared === undefined) delete process.env.AI_MGR_SHARED_PORT;
-    else process.env.AI_MGR_SHARED_PORT = prevShared;
-    sessions._resetSharedForTest();
-    try { pty.kill("session:sess_legacyweb"); } catch {}
-    try { fs.unlinkSync(fakeBin); } catch {}
-  }
-});
-
-test("sessions: backfill adopts the workspace chat id + real title", async () => {
-  const os = require("os");
-  const path = require("path");
-  const fs = require("fs");
-  store._resetForTest(path.join(os.tmpdir(), `aimgr-ocfill-${Date.now()}.json`));
-  const ws = sessions.createWorkspace(os.tmpdir());
-  const list = [{ id: "ses_claim1", title: "real backend title", created: 9999999999999, directory: ws.path }];
-  const fakeBin = path.join(os.tmpdir(), `fake-oclist-${Date.now()}.sh`);
-  fs.writeFileSync(fakeBin, `#!/bin/bash\necho '${JSON.stringify(list)}'\n`);
-  fs.chmodSync(fakeBin, 0o755);
-  const prevBin = process.env.OPENCODE_BIN;
-  process.env.OPENCODE_BIN = fakeBin;
-  try {
-    store.addSession({
-      id: "sess_fillme", workspaceId: ws.id, harness: "opencode",
-      title: `opencode · ${ws.name}`, mode: "pty", port: null, status: "running",
-      harnessSessionId: null, createdAt: Date.now(), lastActiveAt: Date.now(),
-    });
-    const got = await sessions.backfillOpencodeHarnessId("sess_fillme");
-    assert.ok(got, "backfill must claim the chat");
-    assert.equal(sessions.sessionById("sess_fillme").harnessSessionId, "ses_claim1");
-    assert.equal(sessions.sessionById("sess_fillme").title, "real backend title");
-  } finally {
-    if (prevBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = prevBin;
-    try { fs.unlinkSync(fakeBin); } catch {}
-  }
-});
-
-test("sessions: backfill leaves sessions alone when no chat matches", async () => {
-  const os = require("os");
-  const path = require("path");
-  const fs = require("fs");
-  store._resetForTest(path.join(os.tmpdir(), `aimgr-ocfillnone-${Date.now()}.json`));
-  const ws = sessions.createWorkspace(os.tmpdir());
-  const fakeBin = path.join(os.tmpdir(), `fake-oclistnone-${Date.now()}.sh`);
-  fs.writeFileSync(fakeBin, "#!/bin/bash\necho '[]'\n");
-  fs.chmodSync(fakeBin, 0o755);
-  const prevBin = process.env.OPENCODE_BIN;
-  process.env.OPENCODE_BIN = fakeBin;
-  try {
-    store.addSession({
-      id: "sess_fillnone", workspaceId: ws.id, harness: "opencode",
-      title: `opencode · ${ws.name}`, mode: "pty", port: null, status: "running",
-      harnessSessionId: null, createdAt: Date.now(), lastActiveAt: Date.now(),
-    });
-    const got = await sessions.backfillOpencodeHarnessId("sess_fillnone");
-    assert.equal(got, null);
-    assert.equal(sessions.sessionById("sess_fillnone").harnessSessionId, null);
-    assert.equal(sessions.sessionById("sess_fillnone").title, `opencode · ${ws.name}`);
-  } finally {
-    if (prevBin === undefined) delete process.env.OPENCODE_BIN;
-    else process.env.OPENCODE_BIN = prevBin;
-    try { fs.unlinkSync(fakeBin); } catch {}
   }
 });

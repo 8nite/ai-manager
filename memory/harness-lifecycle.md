@@ -1,7 +1,7 @@
 ---
 name: harness-lifecycle
 description: ai-manager session/workspace lifecycle fixes (dedup, droid fallback, shutdown, restart semantics) 2026-10-09
-date_modified: 2026-10-11
+date_modified: 2026-10-23
 tags: [ai-manager, sessions, droid, agy, workspaces, shutdown, systemd, deploy]
 links: [[manager-proxy-remote]], [[prod-web-testing]], [[harness-switch]]
 ---
@@ -73,7 +73,7 @@ Fixes (AGENTS.md "Deploy" two-path rule + unit flag):
 
 Antigravity CLI (`agy`, v1.3.3) as a PTY harness like droid
 (`backends.js` + `sessions.js ptyArgsFor` + switch/pills/styles + e2e block).
-Default `--model gemini-3.8-flash-low` (`AGY_MODEL` / `AGY_ARGS` / `AGY_BIN`
+Default `--model gemini-3.8-flash-high` (`AGY_MODEL` / `AGY_ARGS` / `AGY_BIN`
 overrides mirror `DROID_*`/`DSH_*`).
 
 - First boot in an untrusted folder stops at a trust prompt (Enter accepts;

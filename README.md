@@ -19,7 +19,7 @@ Supported harnesses (v0.1):
 | `opencode` | web UI | `opencode serve --port <auto>` in the workspace dir, shown in an iframe |
 | `dsh` (deepseek-harness) | terminal (one-shot CLI) | `dsh headless "<goal>"` (via `npx -y @deepseek-ai/dsh`) in the workspace dir, streamed to xterm.js; Resume re-runs the goal |
 | `droid` | terminal UI | `droid` PTY in the workspace dir, rendered with xterm.js in the main window |
-| `agy` (antigravity) | terminal UI | `agy` PTY in the workspace dir (default model `gemini-3.8-flash-low`), rendered with xterm.js in the main window |
+| `agy` (antigravity) | terminal UI | `agy` PTY in the workspace dir (default model `gemini-3.8-flash-high`), rendered with xterm.js in the main window |
 
 Remote access works exactly like `opencode.nexvision.cc`: run the tunnel
 client on this machine and open `https://ai-manager.nexvision.cc`
@@ -54,7 +54,7 @@ Env vars:
 | `OPENCODE_BIN` | `opencode` | opencode binary |
 | `DROID_BIN` | `droid` | droid binary (+ `DROID_ARGS`) |
 | `DSH_BIN` | `npx` | dsh launcher (+ `DSH_ARGS` full argv override, default `-y @deepseek-ai/dsh headless`) |
-| `AGY_BIN` | `agy` | agy binary (+ `AGY_MODEL` default `gemini-3.8-flash-low`, `AGY_ARGS` full argv override) |
+| `AGY_BIN` | `agy` | agy binary (+ `AGY_MODEL` default `gemini-3.8-flash-high`, `AGY_ARGS` full argv override) |
 | `AI_MGR_SHELL` | auto | console shell (`powershell.exe` on win32, else `bash`) |
 | `AI_MGR_OPENCODE_PASSWORD` | `~/.ai-manager/opencode-password` (generated) | stable password for per-session `opencode serve`; proxy injects it so new sessions auto-connect locally |
 

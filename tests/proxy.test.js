@@ -805,3 +805,91 @@ test("proxy: workspace config GETs cache briefly, mutations invalidate", async (
     srv.close();
   }
 });
+
+test("proxy: apiScope dynamically tracks frameElement.dataset.sess and explicitMiddleware survives deleted boot session", async () => {
+  const os = require("os");
+  const path = require("path");
+  const store = require("../src/server/store");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-proxy-dynscope-${Date.now()}.json`));
+
+  const body = proxy.apiScopeBodyFor("sess_boot");
+  assert.ok(body.includes("frameElement") && body.includes("dataset.sess"),
+    "api-scope must read frameElement.dataset.sess dynamically after client-side switches");
+
+  const srv = await echoBackend();
+  const port = srv.address().port;
+  try {
+    const ws = store.addWorkspace({ id: "ws_1", path: "/tmp", name: "tmp", createdAt: 1 });
+    store.addSession({
+      id: "sess_live", workspaceId: ws.id, harness: "opencode", title: "live",
+      mode: "web", port, status: "running", createdAt: 1, lastActiveAt: 1,
+    });
+    // Sub-resource on a deleted boot session (/s/sess_deleted/api/info) with
+    // aimgr_active pointing at the live session must proxy instead of 404ing.
+    const res = mockRes();
+    const done = new Promise((r) => res.on("done", r));
+    proxy.explicitMiddleware(
+      mockReq({ method: "GET", url: "/s/sess_deleted/api/info", headers: { cookie: "aimgr_active=sess_live" } }),
+      res,
+      () => { throw new Error("should not fall through"); }
+    );
+    const raw = await done;
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(raw).url, "/api/info");
+  } finally {
+    srv.close();
+  }
+});
+
+test("proxy: apiScope XHR.open preserves call arity (async default, upload fix)", () => {
+  // Regression: the scope wrapper forwarded `open(m,u,undefined,undefined,
+  // undefined)` for 2-arg calls. Chrome treats the explicit 3rd arg as
+  // "provided", flipping the request to sync — then opencode's file upload
+  // (`s.open("POST",url); s.responseType="json"`) throws
+  // "response type cannot be changed for synchronous requests" and the
+  // composer shows "Upload failed".
+  const body = proxy.apiScopeBodyFor("sess_scopearity");
+  assert.ok(body.includes("aimgr-api-scope"));
+
+  const calls = [];
+  function FakeXHR() {}
+  FakeXHR.prototype.open = function (...a) { calls.push(a); };
+  const g = globalThis;
+  const saved = {
+    window: g.window, location: g.location,
+    XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource, WebSocket: g.WebSocket,
+  };
+  g.window = {};
+  g.location = { href: "https://mgr.example/s/sess_scopearity/", origin: "https://mgr.example" };
+  g.XMLHttpRequest = FakeXHR;
+  g.EventSource = undefined;
+  g.WebSocket = undefined;
+  try {
+    eval(body);
+    const xhr = new FakeXHR();
+    // 2-arg call (opencode upload shape): native must see exactly 2 args so
+    // async keeps defaulting to true.
+    xhr.open("POST", "/api/experimental/fs/write?path=/tmp/x");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].length, 2);
+    assert.equal(calls[0][0], "POST");
+    assert.equal(calls[0][1], "https://mgr.example/s/sess_scopearity/api/experimental/fs/write?path=/tmp/x");
+    // Explicit sync + credentials must still forward untouched.
+    calls.length = 0;
+    xhr.open("GET", "/api/info", false, "u", "p");
+    assert.equal(calls[0].length, 5);
+    assert.deepEqual(calls[0].slice(2), [false, "u", "p"]);
+    assert.equal(calls[0][1], "https://mgr.example/s/sess_scopearity/api/info");
+    // URL objects (opencode builds `new URL(path, connUrl)`) also rewrite.
+    calls.length = 0;
+    xhr.open("POST", new URL("/api/experimental/fs/write", "https://mgr.example"));
+    assert.equal(calls[0].length, 2);
+    assert.equal(calls[0][1], "https://mgr.example/s/sess_scopearity/api/experimental/fs/write");
+  } finally {
+    g.window = saved.window;
+    g.location = saved.location;
+    g.XMLHttpRequest = saved.XMLHttpRequest;
+    g.EventSource = saved.EventSource;
+    g.WebSocket = saved.WebSocket;
+  }
+});

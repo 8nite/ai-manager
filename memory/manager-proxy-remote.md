@@ -1,7 +1,7 @@
 ---
 name: manager-proxy-remote
 description: ai-manager tunnel-proxy fixes for remote web harnesses (2026-10-09)
-date_modified: 2026-10-10
+date_modified: 2026-10-24
 tags: [ai-manager, proxy, tunnel, regression-tests]
 links: [[opencode-v2-web]], [[prod-web-testing]]
 ---
@@ -277,3 +277,62 @@ Fix (this note's change set):
 - Note: opencode frontend concurrency/timeout internals (`limit 4`,
   `headersTimeoutMs 60s`, `POST /api/worktree` 600s) live in its bundled
   `runtime-*.js`; bump asset name per opencode release when grepping.
+
+## 12. XHR.open wrapper must preserve call arity (file-upload fix, 2026-10-24)
+
+Symptom (remote only): attaching a file in the opencode web UI showed
+`Upload failed` + `Failed to set the 'responseType' property on
+'XMLHttpRequest': ... cannot be changed for synchronous requests`.
+
+Root cause: opencode uploads via `xhr.open("POST", url)` (2 args, async
+defaults true) then `xhr.responseType = "json"` (`mi()` in the session-route
+chunk; the only `responseType` use in the whole web bundle). The
+`apiScopeBodyFor` wrapper (`src/server/proxy.js`) re-dispatched as
+`OO.call(this, m, u, a, s, w)` — forwarding explicit `undefined` for the
+missing `async`. Chrome treats the provided-but-undefined 3rd arg as
+"not omitted" and flips the request to sync, so `responseType=` throws and
+the promise rejects into the `Upload failed` toast. Reproduced headless:
+2-arg open + `responseType=` threw pre-fix, works post-fix; explicit
+`async=false` still throws (sync preserved).
+
+Fix: arity-preserving re-dispatch (`arguments.length` → 2/3/4/5-arg
+`OO.call`). The sibling `WebSocket` wrapper already did this
+(`r!==undefined?...`); `fetch`/`EventSource` need no arity care (no sync
+mode). CSP hash is recomputed live from the body, so no hash to update.
+
+Tests: `tests/proxy.test.js` executes the generated scope body against a
+stub XHR (2-arg stays 2 args + URL scoped, 5-arg with `false` preserved,
+URL-object input rewrites); `scripts/e2e-web-defaults.sh` asserts
+2-arg-open-then-`responseType` succeeds in the real proxied browser.
+Rule for future wrappers: never forward `undefined` for omitted
+optional args on sync-capable APIs — re-dispatch by `arguments.length`.
+
+## 13. Remote upload 413 → 24 MB cap (2026-10-24)
+
+Symptom: attaching a file >16 MB remotely failed with
+`Upload failed with status 413`. Provenance: ingress-nginx access log
+showed nginx itself returning 413 for
+`POST /s/.../api/experimental/fs/write` — browser→gateway never reached
+the pod. Direct backend (20 MB → 200) and manager proxy (20 MB → 200)
+were both fine, so the 16m `proxy-body-size` ingress annotation was the
+only gate. (A 416 KB upload in the same hour succeeded, consistent with a
+size gate, not a broken path.)
+
+Fix (covers everything opencode itself accepts — 20 MiB decoded per
+attachment; larger files upload but the server rejects them at prompt
+time anyway):
+- `k8s/ai-gateway/deploy.yaml`: `proxy-body-size` `16m` → `24m`,
+  gateway pod memory limit 256Mi → 512Mi (uploads buffer ~2.5× body
+  transiently: raw Buffer + base64 WS frame).
+- `k8s/ai-gateway/server.js`: `rawBodyCapture` limit 16 MB → 24 MB
+  (comment cites the ingress annotation — keep the two in sync).
+- Rollout: rebuild the `ai-manager-gateway-code` ConfigMap from source
+  (keys: `*.js`+`gateway-admin` verbatim, `public/*` as `public_<name>`
+  with dots→underscores), `kubectl apply -f deploy.yaml`, then
+  `kubectl rollout restart deploy/ai-manager-gateway` (code rides the
+  ConfigMap — no reloader, restart required). Tunnel client reconnects
+  on its own (backoff); confirm via gateway `/health` `tunnelConnected`.
+- Verified live: 17 MB and 23 MB POSTs pass ingress (302 at auth, not
+  413); 30 MB still 413s. No `scripts/build-configmap.sh` exists despite
+  deploy.yaml referencing it — the create/apply pipeline above is the
+  procedure until that script is written.

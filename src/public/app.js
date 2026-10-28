@@ -14,6 +14,7 @@ const state = {
   activeFilter: "all", // 'all' | 'active' | 'waiting'
   renamingId: null, // session id currently inline-renaming in the left panel
   dismissedAttention: new Set(), // session ids dismissed from the attention shelf (re-arms on next waiting turn)
+  attentionCollapsed: false, // Needs Attention shelf + dashboard feed collapsed (persists)
   conEs: null,
   conTerm: null,
   conFit: null,
@@ -57,6 +58,7 @@ async function refresh() {
     });
     state.consoles = s.consoles || [];
     pruneDismissedAttention();
+    syncOpencodeTabs();
 
     // Prune panes whose session vanished (deleted workspace/session).
     const live = new Set(state.sessions.map((x) => x.id));
@@ -178,6 +180,26 @@ function dismissAttention(id) {
   updateCounts();
 }
 
+// Collapsed Needs Attention: the shelf header + dashboard feed share one
+// persisted flag. Collapsed hides the cards but keeps the header (with the
+// waiting count) so the shelf still signals at a glance.
+const ATTENTION_COLLAPSED_KEY = "ai-manager.attentionCollapsed";
+
+function loadAttentionCollapsed() {
+  try { state.attentionCollapsed = localStorage.getItem(ATTENTION_COLLAPSED_KEY) === "1"; } catch {}
+}
+
+function saveAttentionCollapsed() {
+  try { localStorage.setItem(ATTENTION_COLLAPSED_KEY, state.attentionCollapsed ? "1" : "0"); } catch {}
+}
+
+function toggleAttentionCollapsed() {
+  state.attentionCollapsed = !state.attentionCollapsed;
+  saveAttentionCollapsed();
+  renderAttentionShelf();
+  renderDash();
+}
+
 function visibleWaiting() {
   return state.sessions.filter((s) => s.activity === "waiting" && !state.dismissedAttention.has(s.id));
 }
@@ -194,12 +216,16 @@ function renderAttentionShelf() {
   }
 
   shelf.classList.remove("hidden");
+  shelf.classList.toggle("collapsed", state.attentionCollapsed);
   shelf.innerHTML = `
-    <div class="shelf-header">
+    <button class="shelf-header shelf-toggle" aria-expanded="${state.attentionCollapsed ? "false" : "true"}" title="${state.attentionCollapsed ? "Expand" : "Collapse"} Needs Attention">
+      <span class="caret" aria-hidden="true">▼</span>
       <span class="pulse-spark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13 2 4.5 13.5H11L9.5 22 19 10h-6.5L13 2z"/></svg></span>
       <span>Needs Attention (${waiting.length})</span>
-    </div>
+    </button>
   `;
+  shelf.querySelector(".shelf-toggle").onclick = () => toggleAttentionCollapsed();
+  if (state.attentionCollapsed) return;
 
   const wsById = Object.fromEntries(state.workspaces.map((w) => [w.id, w]));
   for (const s of waiting) {
@@ -582,6 +608,9 @@ function renderDash() {
     const waitingSessions = visibleWaiting();
     if (waitingSessions.length > 0) {
       attSection.classList.remove("hidden");
+      attSection.classList.toggle("collapsed", state.attentionCollapsed);
+      const attToggle = $("dashAttentionToggle");
+      if (attToggle) attToggle.setAttribute("aria-expanded", state.attentionCollapsed ? "false" : "true");
       attList.innerHTML = "";
       const wsById = Object.fromEntries(state.workspaces.map((w) => [w.id, w]));
 
@@ -724,13 +753,19 @@ function attachFrameListeners(p, frame) {
 }
 
 function forceFrameReload(frame, sessionId) {
+  // Always reload via the session-root prefix (/s/:id/) so the proxy
+  // re-injects the route shim, web defaults, no-titlebar CSS, and api-scope:
+  // after the SPA route shim rewrites location to /server/:key/session/:hid,
+  // a bare location.reload() would hit fallbackMiddleware without shims.
+  try {
+    frame.src = `/s/${sessionId}/`;
+    return;
+  } catch {}
   try {
     if (frame.contentWindow && frame.contentWindow.location) {
       frame.contentWindow.location.reload();
-      return;
     }
   } catch {}
-  try { frame.src = `/s/${sessionId}/`; } catch {}
 }
 
 function paneUid() {
@@ -981,21 +1016,36 @@ function paintPane(p) {
   }
   empty.classList.add("hidden");
   if (s.mode === "web") {
+    syncOpencodeTabs();
     termBox.classList.add("hidden");
     let frame = cache.get(p.sessionId);
     if (!frame || !frame.isConnected) {
-      frame = document.createElement("iframe");
-      frame.className = "pane-frame hidden";
-      frame.title = "Harness Web UI";
-      frame.dataset.sess = p.sessionId;
-      attachFrameListeners(p, frame);
-      body.appendChild(frame);
-      frame.src = `/s/${p.sessionId}/`;
-      cache.set(p.sessionId, frame);
+      const samePort = s.harnessSessionId ? clientSwitchFrame(p, s) : null;
+      if (samePort) {
+        frame = samePort;
+        retargetFrameCache(p, frame, p.sessionId);
+        clientSwitchSession(frame, s.harnessSessionId);
+      } else {
+        frame = document.createElement("iframe");
+        frame.className = "pane-frame hidden";
+        frame.title = "Harness Web UI";
+        frame.dataset.sess = p.sessionId;
+        attachFrameListeners(p, frame);
+        body.appendChild(frame);
+        frame.src = `/s/${p.sessionId}/`;
+        cache.set(p.sessionId, frame);
+      }
     } else {
       // Refresh LRU order: recent use moves to the end.
       cache.delete(p.sessionId);
       cache.set(p.sessionId, frame);
+      if (s.harnessSessionId) {
+        try {
+          if (frame.contentWindow && !String(frame.contentWindow.location.href).includes(String(s.harnessSessionId))) {
+            clientSwitchSession(frame, s.harnessSessionId);
+          }
+        } catch {}
+      }
     }
     for (const [sid, f] of cache) {
       if (sid === p.sessionId) f.classList.remove("hidden");
@@ -1023,6 +1073,73 @@ function isFrameCached(p, id) {
   return !!(f && f.isConnected);
 }
 
+// Sync manager opencode sessions into opencode web's window-tab store
+// (`opencode.window.browser.dat:tabs` + `tabs.info`).
+//
+// Opencode web's titlebar (<AA> in index-*.js, mounted even when hidden via
+// CSS) pre-syncs `session.sync(id, {children:true})`, permissions, forms,
+// pending inbox, and ComposerState for every tab in `tabs`. Seeding all
+// manager opencode chats here means `m.session.info[id]` (incl.
+// `location.directory`) is already warm before a route switch — so
+// <Show when={directory}> in TargetSessionRouteContent never unmounts/reinits
+// the session view tree when switching sessions.
+const OC_TABS_KEY = "opencode.window.browser.dat:tabs";
+const OC_TABS_INFO_KEY = "opencode.window.browser.dat:tabs.info";
+
+function syncOpencodeTabs() {
+  try {
+    const key = opencodeServerKey();
+    const srv = location.origin;
+    if (!key || !srv) return;
+    const wsById = Object.fromEntries((state.workspaces || []).map((w) => [w.id, w]));
+    const opSessions = (state.sessions || []).filter(
+      (s) => s && s.harness === "opencode" && s.mode === "web" && s.harnessSessionId
+    );
+    if (!opSessions.length) return;
+    let existing = [];
+    try {
+      const raw = localStorage.getItem(OC_TABS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) existing = parsed;
+    } catch {}
+    const drafts = existing.filter((t) => t && t.type === "draft");
+    const tabs = [
+      ...opSessions.map((s) => ({
+        type: "session",
+        server: srv,
+        sessionId: s.harnessSessionId,
+      })),
+      ...drafts,
+    ];
+    localStorage.setItem(OC_TABS_KEY, JSON.stringify(tabs));
+
+    let info = {};
+    try {
+      const rawInfo = localStorage.getItem(OC_TABS_INFO_KEY);
+      const parsedInfo = rawInfo ? JSON.parse(rawInfo) : {};
+      if (parsedInfo && typeof parsedInfo === "object" && !Array.isArray(parsedInfo)) info = parsedInfo;
+    } catch {}
+    const liveKeys = new Set();
+    for (const s of opSessions) {
+      const ws = wsById[s.workspaceId];
+      const dir = (ws && ws.path) || "";
+      if (!dir) continue;
+      const tk = `${srv}\n/server/${key}/session/${s.harnessSessionId}`;
+      liveKeys.add(tk);
+      const prev = info[tk];
+      info[tk] = {
+        title: s.title || (prev && prev.title) || s.id,
+        directory: dir,
+        prompted: !!(prev && prev.prompted),
+      };
+    }
+    for (const k of Object.keys(info)) {
+      if (!liveKeys.has(k)) delete info[k];
+    }
+    localStorage.setItem(OC_TABS_INFO_KEY, JSON.stringify(info));
+  } catch {}
+}
+
 // Client-side web session switching: one live SPA per pane.
 //
 // The opencode SPA owns a client router (/server/:key/session/:id): pushing
@@ -1043,15 +1160,21 @@ function frameSessionPort(pane, frame) {
 function visibleWebFrame(pane) {
   try {
     const el = pane && pane._el;
-    const f = el && [...el.querySelectorAll(".pane-frame")].find((x) => !x.classList.contains("hidden"));
+    let f = el && [...el.querySelectorAll(".pane-frame")].find((x) => !x.classList.contains("hidden"));
+    // Also recover the cached web frame when the pane temporarily showed a
+    // PTY session (which hid all .pane-frame nodes without destroying them).
+    if (!f && pane && pane._frameCache) {
+      f = [...pane._frameCache.values()].reverse().find((x) => x && x.isConnected);
+    }
     if (!f || !f.isConnected) return null;
-    void f.contentWindow.location.href; // throws cross-origin → fallback
+    const href = f.contentWindow && f.contentWindow.location && f.contentWindow.location.href;
+    if (!href || href === "about:blank") return null;
     return f;
   } catch { return null; }
 }
 
 function clientSwitchFrame(pane, target) {
-  if (!target || target.mode !== "web" || !target.harnessSessionId || !target.port) return null;
+  if (!target || target.mode !== "web" || !target.port) return null;
   const f = visibleWebFrame(pane);
   if (!f) return null;
   if (frameSessionPort(pane, f) !== target.port) return null; // cross-backend: full load
@@ -1064,28 +1187,109 @@ function opencodeServerKey() {
   } catch { return null; }
 }
 
+// True when the live opencode SPA in `w` has settled on `hid`: either a fresh
+// backend fetch for `hid` arrived (cold chat) OR opencode's reactive Tabs +
+// Router marked `hid` active with the session chat mounted (warm switch-back
+// or SSE-created chat where opencode's one-shot message store makes zero
+// repeat network requests).
+function isSpaRoutedTo(w, hid, seenMsg, seenSess) {
+  try {
+    const doc = w.document;
+    if (!doc || !doc.body) return false;
+    if (String(doc.body.innerText || "").includes("Unrecognised route!")) return false;
+    const msgUrl = `/api/session/${hid}/message`;
+    const sessUrl = `/api/session/${hid}`;
+    const entries = w.performance.getEntriesByType("resource");
+    let curMsg = 0, curSess = 0;
+    for (const r of entries) {
+      const u = String(r.name || "");
+      if (u.includes(msgUrl)) curMsg++;
+      else if (u.endsWith(sessUrl) || u.includes(`${sessUrl}?`)) curSess++;
+    }
+    if ((seenMsg >= 0 && curMsg > seenMsg) || (seenSess >= 0 && curSess > seenSess)) return true;
+    const activeTab = doc.querySelector(
+      `[data-titlebar-tab-slot][data-active="true"] a[data-slot="tab-link"][href$="/session/${hid}"]`
+    );
+    const chatMounted = doc.querySelector(
+      '[data-slot="session-chat-panel"], [data-component="session-composer-dock"], [data-session-title]'
+    );
+    if (activeTab && chatMounted) return true;
+    if (chatMounted && !doc.querySelector("[data-titlebar-tab-slot]")) return true;
+    return false;
+  } catch { return false; }
+}
+
 // Push the live SPA to another chat; verify the router actually switched
-// (a fresh message fetch for the target appears, no new document
-// navigation), else false. Never throws.
+// (no new document navigation), else false. Never throws.
 async function clientSwitchSession(frame, hid, timeoutMs) {
   const key = opencodeServerKey();
   if (!frame || !key || !hid) return false;
   try {
+    syncOpencodeTabs();
     const w = frame.contentWindow;
     const navsBefore = w.performance.getEntriesByType("navigation").length;
-    const seenBefore = new Set(w.performance.getEntriesByType("resource").map((r) => r.name));
-    w.history.pushState(null, "", `/server/${key}/session/${hid}`);
-    w.dispatchEvent(new w.PopStateEvent("popstate"));
+    const msgUrl = `/api/session/${hid}/message`;
+    const sessUrl = `/api/session/${hid}`;
+    const countRes = (needle, exact) => {
+      try {
+        return w.performance.getEntriesByType("resource").reduce((n, r) => {
+          const u = String(r.name || "");
+          return n + ((exact ? (u.endsWith(needle) || u.includes(`${needle}?`)) : u.includes(needle)) ? 1 : 0);
+        }, 0);
+      } catch { return -1; }
+    };
+    const seen = countRes(msgUrl, false);
+    const seenSess = countRes(sessUrl, true);
+    const targetPath = `/server/${key}/session/${hid}`;
+    // Prefer opencode's native tab-select handler when the tab link is
+    // already mounted (updates Tabs.recent + Solid Router in one batch);
+    // always ensure location + popstate converge onto targetPath.
+    try {
+      const tabLink = w.document && w.document.querySelector(`a[data-slot="tab-link"][href$="/session/${hid}"]`);
+      if (tabLink) {
+        tabLink.dispatchEvent(new w.MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+      }
+    } catch {}
+    if (!String(w.location && w.location.pathname).endsWith(`/session/${hid}`)) {
+      w.history.pushState(null, "", targetPath);
+      w.dispatchEvent(new w.PopStateEvent("popstate"));
+    }
     const deadline = Date.now() + (timeoutMs || 6000);
+    // Fresh chats (never fetched in this document: just created, no tab link
+    // yet) may mount with zero network — seeded tabs.info + the session sync
+    // cache mean no fresh fetch fires and no tab is marked active, so the
+    // strict verify above would burn the full ~6s and fall back to a second
+    // document (the "new session takes forever" blank-loader gap). Fast-accept
+    // instead: once the route holds the hid with a chat view mounted across a
+    // short settle (a stale previous-chat panel swaps out within frames of
+    // popstate), stay in the live SPA. Bad routes still fail via the
+    // navigation + href + Unrecognised-route guards, on a shorter cap.
+    const isFresh = seen === 0 && seenSess === 0;
+    const freshDeadline = Date.now() + Math.min(timeoutMs || 6000, 2000);
+    let step = 0;
+    let settled = 0;
     for (;;) {
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, step++ < 4 ? 25 : 100));
       try {
         if (w.performance.getEntriesByType("navigation").length !== navsBefore) return false;
         if (!String(w.location.href).includes(String(hid))) return false;
-        const fresh = w.performance.getEntriesByType("resource").map((r) => r.name);
-        if (fresh.some((u) => !seenBefore.has(u) && u.includes(`/api/session/${hid}/message`))) return true;
+        if (isSpaRoutedTo(w, hid, seen, seenSess)) return true;
+        if (isFresh) {
+          let freshMounted = false;
+          try {
+            const doc = w.document;
+            freshMounted = !!doc && !!doc.body &&
+              !String(doc.body.innerText || "").includes("Unrecognised route!") &&
+              !!doc.querySelector('[data-slot="session-chat-panel"], [data-component="session-composer-dock"], [data-session-title]');
+          } catch { return false; }
+          if (freshMounted) {
+            if (++settled >= 5) return true;
+          } else {
+            settled = 0;
+          }
+        }
       } catch { return false; }
-      if (Date.now() > deadline) return false;
+      if (Date.now() > (isFresh ? freshDeadline : deadline)) return false;
     }
   } catch { return false; }
 }
@@ -1101,7 +1305,16 @@ function retargetFrameCache(pane, frame, id) {
       if (sid !== id) cache.delete(sid);
     }
     frame.dataset.sess = id;
+    frame.classList.remove("hidden");
     cache.set(id, frame);
+    if (pane && pane._el) {
+      const termBox = pane._el.querySelector(".pane-term");
+      const empty = pane._el.querySelector(".pane-empty");
+      if (termBox) termBox.classList.add("hidden");
+      if (empty) empty.classList.add("hidden");
+    }
+    if (pane && pane.es) { try { pane.es.close(); } catch {} pane.es = null; }
+    if (pane && pane.term) { try { pane.term.dispose(); } catch {} pane.term = null; pane.fit = null; }
   } catch {}
 }
 
@@ -1112,10 +1325,23 @@ function retargetFrameCache(pane, frame, id) {
 // fire no document load for the frame handler to catch.
 async function tryClientSwitch(pane, s, id, stale) {
   const navFrame = clientSwitchFrame(pane, s);
-  if (!navFrame) return false;
+  if (!navFrame || !s.harnessSessionId) return false;
   showStageLoader(`switching ${s.title || s.harness}…`);
+  // Re-key immediately so concurrent paints/double-clicks and the iframe's
+  // dynamic api-scope prefix see the target session while verify runs.
+  const prevSid = navFrame.dataset && navFrame.dataset.sess;
+  retargetFrameCache(pane, navFrame, id);
   const switched = await clientSwitchSession(navFrame, s.harnessSessionId);
-  if (stale() || !switched || pane.sessionId !== id) return false;
+  if (stale() || !switched || pane.sessionId !== id) {
+    if (!switched && pane._frameCache && pane._frameCache.get(id) === navFrame) {
+      pane._frameCache.delete(id);
+      if (prevSid && prevSid !== id) {
+        navFrame.dataset.sess = prevSid;
+        pane._frameCache.set(prevSid, navFrame);
+      }
+    }
+    return false;
+  }
   retargetFrameCache(pane, navFrame, id);
   hideStageLoader();
   observeActivePane();
@@ -1291,6 +1517,11 @@ async function activateSession(id) {
 }
 
 async function setPaneSession(pane, id) {
+  // Dedupe rapid re-activates of the same session in one pane (double-click
+  // fires two activates + startRename): the first switch already owns the
+  // ensure + iframe boot, so a second concurrent one only doubles backend
+  // load and frame churn for an identical end state. Just focus instead.
+  if (pane.sessionId === id && state.switchingIds.has(pane.pid)) { focusPane(pane.pid); return; }
   const my = ++activateSeq;
   pane.seq = my;
   const stale = () => pane.seq !== my;
@@ -1299,6 +1530,10 @@ async function setPaneSession(pane, id) {
   state.activePanePid = pane.pid;
   syncLegacyActive();
   state.switchingId = id;
+  // Stuck-gate insurance (see finally): any throw/rejection below must still
+  // clear this switch's flag, or refresh() skips the sidebar forever.
+  // Seq-guarded so a stale switch never clears a newer switch's flag early.
+  try {
   // Snapshot BEFORE paintPane (see below).
   const s0 = state.sessions.find((x) => x.id === id);
   const wasCached = !!s0 && s0.mode === "web" && isFrameCached(pane, id);
@@ -1458,6 +1693,12 @@ async function setPaneSession(pane, id) {
     // No re-observe here: narration already follows the switch intent
     // (synchronous observe above), and observing again now would wipe
     // content fed since. The iframe load handler re-targets on commit.
+  }
+  } finally {
+    if (pane.seq === my) {
+      state.switchingIds.delete(pane.pid);
+      syncLegacyActive();
+    }
   }
 }
 
@@ -2827,6 +3068,9 @@ window.addEventListener("resize", () => {
 // Boot
 (async function boot() {
   loadDismissedAttention();
+  loadAttentionCollapsed();
+  const attToggle = $("dashAttentionToggle");
+  if (attToggle) attToggle.onclick = () => toggleAttentionCollapsed();
   restorePaneLayout();
   ensurePane();
   renderPanes();

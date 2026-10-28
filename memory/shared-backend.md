@@ -1,9 +1,9 @@
 ---
 name: shared-backend
-description: Single shared opencode serve backend for all manager sessions (2026-10-13)
-date_modified: 2026-10-13
+description: Single shared opencode serve backend for all manager sessions (2026-10-13, PTY experiment reverted 2026-10-23)
+date_modified: 2026-10-24
 tags: [ai-manager, opencode, sessions, performance, architecture]
-links: [[session-switch-cache]], [[opencode-v2-web]], [[harness-lifecycle]], [[manager-proxy-remote]]
+links: [[session-switch-cache]], [[opencode-v2-web]], [[harness-lifecycle]], [[manager-proxy-remote]], [[client-nav-switch]], [[opencode-upgrade]]
 ---
 
 # Shared opencode backend (one serve, many chats)
@@ -78,3 +78,21 @@ opencode session as a chat (`POST /api/session` per session).
 - Known ceiling: no pid-match check after shared spawn (parity with
   `startWeb`); a foreign process holding the shared port with our password
   would be adopted. Disjoint ports by construction; revisit if multi-tenant.
+
+## Follow-up 2026-10-23 — PTY experiment reverted, back on shared web
+
+The 2026-10-14 opencode web→PTY migration
+(note retired with the revert) was reverted: `backends.js` opencode is `mode: "web"` again
+(`serve` + `OPENCODE_SERVER_PASSWORD`), and `sessions.js` drops
+`maybeRetireSharedBackend` / `backfillOpencodeHarnessId` /
+`backfillOpencodeIds` plus the per-poll backfill calls in `index.js`.
+The seamless [[client-nav-switch]] lane (warm switches with zero repeat
+fetches, fresh-chat fast-accept ~200-500ms) removed the reason to pay TUI
+costs (narrate backlog floods, per-session PTY, chat-id backfill).
+
+- `restoreAll` boots the shared backend once up front so restores adopt
+  instead of each paying adopt/spawn latency in series.
+- `startWeb` adopts a surviving backend (stamps `backendPid`, zero child
+  spawn); unit covers adopt via pinned `AI_MGR_SHARED_PORT` stub.
+- E2E ports return to the shared gate: only `MGR_PORT` and
+  `HARNESS_BASE-10` must be free (base itself never allocated for opencode).

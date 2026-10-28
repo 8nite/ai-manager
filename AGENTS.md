@@ -93,15 +93,22 @@ pane 1 explicitly first — a fresh page boots with empty panes.
   before launching: embedded in the same `bash -c` as the run, the wrapper
   cmdline contains the literal script name and pgrep self-matches (false
   ABORT, learned 2026-10-13).
+- Standing-ops gate lock (learned 2026-10-27): a periodic CI gate runs this
+  same script (`flock /tmp/standing-ops-e2e.lock`, ports 4003/4460). Check
+  the lock is free before launching (`flock -n /tmp/standing-ops-e2e.lock
+  true`), and never edit `scripts/e2e-web-defaults.sh` while any run (yours
+  or standing-ops) is in flight — bash reads the script incrementally, so a
+  mid-run edit corrupts parsing for the running copy (observed: standing-ops
+  gate died with a spurious line-530 syntax error during an edit).
 - Shared-backend pin (2026-10-13): any unit test driving
   `ensureSession`/`startSession`/`createSession` with an opencode record
   must pin `AI_MGR_SHARED_PORT` to its stub + `_resetSharedForTest()`
   around it — unpinned, shared adopt fails on the real port and the test
   spawns a live `opencode serve` mid-suite. After the suite, the shared
   port (default 4090) must be free.
-- E2E ports: with opencode on PTY there is no shared backend — only
-  `MGR_PORT` and `HARNESS_BASE` must be free (the script gates both; the old
-  `HARNESS_BASE-10` shared-port gate is gone).
+- E2E ports: only `MGR_PORT` and `HARNESS_BASE-10` (the shared backend
+  port) must be free — the base port itself is no longer allocated for
+  opencode. The script gates all three.
 - `node --test` silently skipping everything (`run() called recursively`)
   means a leaked `NODE_TEST_CONTEXT=child-v8` in the shell env (leftover of
   an interrupted run) — always run the suite as
@@ -118,6 +125,15 @@ pane 1 explicitly first — a fresh page boots with empty panes.
 - Never `pkill -f` a server cmdline pattern: the pattern matches your own
   invoking shell too (self-SIGTERM, "Killed"). Kill scratch managers by PID
   (`ss -tlnp` → `kill <pid>`), never by name match.
+- Same-document asserts: a reloaded/new iframe document also reports
+  `navigation.length == 1`, so `navs==1` alone never proves "no reboot".
+  Prove it with monotonic signals instead: pre-existing resource entries for
+  the OLD chat surviving the switch (a reload wipes them) + loader-clear
+  timing with a bound far from both outcomes (~2-4s fixed vs ~21s broken).
+  Frame counts include the static skeleton (budget 1..3, not exactly 1).
+- Never leave the pane on a session you then delete: restore a live session
+  first (switch back + brief settle) or later switch/purge asserts cascade
+  into unrelated failures.
 
 ## Durable memory
 
