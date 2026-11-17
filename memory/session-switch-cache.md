@@ -1,7 +1,7 @@
 ---
 name: session-switch-cache
 description: Fast session switching via per-pane iframe cache + server liveness cache (2026-10-10)
-date_modified: 2026-10-12
+date_modified: 2026-11-06
 tags: [ai-manager, frontend, sessions, performance]
 links: [[split-screen]], [[harness-lifecycle]], [[opencode-v2-web]]
 ---
@@ -103,3 +103,9 @@ identical pre/post, 12/12 `running`.
 - Default `HARNESS_BASE=4300` is HELD by a live backend → scratch
   `allocPort` picks it and `tryAdoptBackend` ADOPTS THE LIVE BACKEND.
   Use `MGR_PORT=4002 HARNESS_BASE=4450` (both verified free first).
+- Always redirect e2e output to a file (`bash scripts/e2e-web-defaults.sh >
+  /tmp/opencode/e2e-*.log 2>&1`), never pipe through `tail`: the script
+  only counts failures (`FAILS=$((FAILS+1))`, no name summary), so a
+  truncated pipe permanently loses which tests failed (learned 2026-11-06:
+  7 of 10 FAIL lines lost to `| tail -60`, full re-run needed). Same reason
+  never to edit the script mid-run — bash reads it incrementally.

@@ -28,13 +28,32 @@ function readDisk() {
   try {
     const raw = fs.readFileSync(filePath(), "utf8");
     const p = JSON.parse(raw);
+    const sessions = Array.isArray(p.sessions) ? p.sessions.map(migrateLuminaSession) : [];
     return {
       workspaces: Array.isArray(p.workspaces) ? p.workspaces : [],
-      sessions: Array.isArray(p.sessions) ? p.sessions : [],
+      sessions,
     };
   } catch {
     return blank();
   }
+}
+
+// One-time migration (lumina → chassis, 2026-11-06): stored lumina records
+// point at lumina chat ids/ports that no longer exist. Re-home them onto the
+// chassis harness; the next ensure repoints the port and backfills the chat.
+// Pure (no disk write here — the next persist converges the file).
+function migrateLuminaSession(s) {
+  if (!s || s.harness !== "lumina") return s;
+  return {
+    ...s,
+    harness: "chassis",
+    mode: "web",
+    port: null,
+    harnessSessionId: null,
+    status: "starting",
+    error: null,
+    backendPid: null,
+  };
 }
 
 function writeDisk(data) {
@@ -67,6 +86,7 @@ function _resetForTest(file) {
 module.exports = {
   filePath,
   load: () => ({ ...cache() }),
+  migrateLuminaSession,
   getWorkspaces: () => cache().workspaces,
   getSessions: () => cache().sessions,
   addWorkspace(w) { cache().workspaces.push(w); persist(); return w; },

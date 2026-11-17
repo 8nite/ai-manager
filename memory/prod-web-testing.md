@@ -1,7 +1,7 @@
 ---
 name: prod-web-testing
 description: How ai-manager prod web (ai-manager.nexvision.cc) was tested end-to-end via browser automation
-date_modified: 2026-10-23
+date_modified: 2026-10-31
 tags: [ai-manager, prod, webauthn, gateway, agent-browser, testing]
 links: [[opencode-v2-web]], [[manager-proxy-remote]], [[browser-automation]]
 ---
@@ -69,6 +69,16 @@ Script bugs fixed along the way (all test-side, product held):
 - Environment, not product: the agent-browser side is profile-singleton —
   concurrent runs/probes on different profiles corrupt each other (lost
   cookies, phantom login walls); serialize everything browser-driving.
+
+## Post-fix full pass baseline (2026-10-31, green)
+
+After the SSE-buffer + gateway-fanout fixes, `prod-session-timing.sh`
+full pass `ok=true total_ms=70320 note="fast-turn"`: login 0.4s, page
+12.6s, session created 18s, interactive 23.7s, prompt sent 64s, reply 70s
+(cold profile over the tunnel; cookie reused from an earlier
+`prod-webauthn.mjs login`, session deleted by the script). Keep as the
+compare baseline — a future pass drifting far above these stages means
+tunnel/proxy regression, not model speed (stages are transport-dominated).
 
 ## Login wall reappeared (2026-10-09 E2E)
 

@@ -46,8 +46,8 @@
   --harness-opencode-soft: rgba(168, 85, 247, 0.15);
   --harness-droid: #10b981;
   --harness-droid-soft: rgba(16, 185, 129, 0.15);
-  --harness-dsh: #06b6d4;
-  --harness-dsh-soft: rgba(6, 182, 212, 0.15);
+  --harness-chassis: #06b6d4;
+  --harness-chassis-soft: rgba(6, 182, 212, 0.15);
   --harness-agy: #f97316;
   --harness-agy-soft: rgba(249, 115, 22, 0.15);
 
@@ -357,7 +357,7 @@ kbd, .kbd {
 }
 .hs-btn.sel[data-harness="opencode"] { color: #c084fc; }
 .hs-btn.sel[data-harness="droid"] { color: #34d399; }
-.hs-btn.sel[data-harness="dsh"] { color: #38bdf8; }
+.hs-btn.sel[data-harness="chassis"] { color: #38bdf8; }
 .hs-btn.sel[data-harness="agy"] { color: #fb923c; }
 #modalHarnessHint b { color: var(--text-main); }
 
@@ -800,8 +800,8 @@ kbd, .kbd {
   color: #34d399;
   border: 1px solid rgba(16, 185, 129, 0.3);
 }
-.tag.dsh {
-  background: var(--harness-dsh-soft);
+.tag.chassis {
+  background: var(--harness-chassis-soft);
   color: #38bdf8;
   border: 1px solid rgba(6, 182, 212, 0.3);
 }
@@ -1276,7 +1276,7 @@ body.side-resizing iframe {
 }
 .hpill.opencode .hpill-dot { background: var(--harness-opencode); }
 .hpill.droid .hpill-dot { background: var(--harness-droid); }
-.hpill.dsh .hpill-dot { background: var(--harness-dsh); }
+.hpill.chassis .hpill-dot { background: var(--harness-chassis); }
 .hpill.agy .hpill-dot { background: var(--harness-agy); }
 
 /* Metrics Row */
@@ -1751,11 +1751,9 @@ body.side-resizing iframe {
 /* Path autocomplete pick-list (open-folder inputs) */
 .autocomplete-wrap { position: relative; }
 .autocomplete-list {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: 60;
+  /* in-flow so the open list pushes layout instead of covering the action buttons */
+  margin-top: 2px;
+  width: 100%;
   background: var(--bg-1);
   border: 1px solid var(--line-highlight);
   border-radius: var(--r-md);

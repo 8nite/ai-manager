@@ -1,9 +1,9 @@
 ---
 name: MEMORY
 description: Index of ai-manager durable memory notes
-date_modified: 2026-10-27
+date_modified: 2026-11-16
 tags: [index]
-links: [[prod-web-testing]], [[opencode-v2-web]], [[manager-proxy-remote]], [[browser-automation]], [[harness-lifecycle]], [[sidebar-rename-race]], [[session-title-sync]], [[ui-chrome-cleanup]], [[harness-switch]], [[split-screen]], [[session-switch-cache]], [[attention-dismiss]], [[narrate-mode]], [[sidebar-delete]], [[web-attention]], [[shared-backend]], [[asset-cache]], [[client-nav-switch]], [[agy-turn-failures]], [[opencode-upgrade]], [[harness2-local]], [[attention-collapse]]
+links: [[prod-web-testing]], [[opencode-v2-web]], [[manager-proxy-remote]], [[browser-automation]], [[harness-lifecycle]], [[sidebar-rename-race]], [[session-title-sync]], [[ui-chrome-cleanup]], [[harness-switch]], [[split-screen]], [[session-switch-cache]], [[attention-dismiss]], [[narrate-mode]], [[sidebar-delete]], [[web-attention]], [[shared-backend]], [[asset-cache]], [[client-nav-switch]], [[agy-turn-failures]], [[opencode-upgrade]], [[harness2-local]], [[attention-collapse]], [[lumina-harness]], [[workspace-isolation]], [[chassis-harness]], [[ui-version-pin-restart]]
 ---
 
 # ai-manager memory index
@@ -22,6 +22,8 @@ links: [[prod-web-testing]], [[opencode-v2-web]], [[manager-proxy-remote]], [[br
 - [[session-switch-cache]] — fast switching: per-pane iframe cache (keep 3) + server liveness cache + respond-before-title-sync; e2e must run serialized on isolated ports.
 - [[attention-dismiss]] — attention shelf per-card dismiss × (hide without delete); re-arms next waiting turn / clears on open; e2e must poll post-open (PTY resize redraw reads working ~8s).
 - [[attention-collapse]] — Needs Attention shelf + dashboard feed collapse/expand on one persisted flag; header keeps the count while cards hide.
+- [[chassis-harness]] — chassis replaces lumina as a shared-daemon web harness (opencode API, per-port secrets, per-harness defaults seed, lumina→chassis store migration, retired-daemon port reclaim).
+- [[lumina-harness]] — lumina replaces dsh as a shared-daemon web harness (?session= deep-link, scope-only proxy, flat title sync); unit green, browser e2e pending quiet re-run.
 - [[narrate-mode]] — top-right Narrate toggle reads session activity aloud (built-in speechSynthesis default; Kokoro-82M documented upgrade, Piper GPL caveat).
 - [[web-attention]] — opencode working/waiting via backend polling (`/active` drain + newest-message rules + permission/form override); web-backend adoption across restarts (survive + `tryAdoptBackend`, PID-identical deploys).
 - [[shared-backend]] — one `opencode serve` (`HARNESS_BASE-10`, live :4090) hosts all sessions as chats; idle-gated legacy migration, per-port `/active` batching, orphan reclaim.
@@ -30,3 +32,5 @@ links: [[prod-web-testing]], [[opencode-v2-web]], [[manager-proxy-remote]], [[br
 - [[agy-turn-failures]] — agy `exit status 1` is a turn-level tool failure (e.g. fetched URL 404), not a manager/PTY/tunnel kill; diagnose via history.jsonl + conversations db.
 - [[harness2-local]] — upstream harness2 on installed opencode binary + current session model (no Vertex); `scripts/harness2-opencode-go.patch` is the durable artifact.
 - [[opencode-upgrade]] — opencode binary upgrade playbook + weekly auto-update cron.
+- [[workspace-isolation]] — cross-workspace asks, credentials hard-deny, /tmp scratch lifecycle; harness2 stays hard-deny + /tmp allow.
+- [[ui-version-pin-restart]] — frontend version bump needs a service restart to change the immutable ?v= pin (VERSION cached at boot).

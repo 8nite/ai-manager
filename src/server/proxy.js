@@ -35,9 +35,7 @@ function apiBackendMiddleware(req, res, next) {
   const sess = cookies.aimgr_active ? sessionById(cookies.aimgr_active) : null;
   const t = targetForSession(sess);
   if (!t) return next();
-  proxyRequest(req, res, t, "/api" + (req.url.split("?")[0] || "/"), {
-    harnessToken: (sess && sess.harnessToken) || null,
-  });
+  proxyRequest(req, res, t, "/api" + (req.url.split("?")[0] || "/"), {});
 }
 
 function parseCookies(req) {
@@ -108,10 +106,16 @@ function injectRouteShim(html, harnessSessionId) {
 // to status quo (private mode, etc.).
 // NB: the CSP hash must cover the EXACT inline text (marker included).
 const WEB_DEFAULTS_SEED_BODY = '/*aimgr-web-defaults*/try{var s="opencode.global.dat:settings.v3";if(localStorage.getItem(s)===null){localStorage.setItem(s,JSON.stringify({general:{followUpBehavior:"queue"}}))}var c="opencode-color-scheme";if(localStorage.getItem(c)===null){localStorage.setItem(c,"dark")}}catch(e){}';
+// Chassis is an opencode fork with rebranded storage keys; same defaults.
+const CHASSIS_DEFAULTS_SEED_BODY = '/*aimgr-web-defaults*/try{var s="chassis.global.dat:settings.v3";if(localStorage.getItem(s)===null){localStorage.setItem(s,JSON.stringify({general:{followUpBehavior:"queue"}}))}var c="chassis-color-scheme";if(localStorage.getItem(c)===null){localStorage.setItem(c,"dark")}}catch(e){}';
 
-function injectWebDefaults(html) {
+function webDefaultsSeedFor(harness) {
+  return harness === "chassis" ? CHASSIS_DEFAULTS_SEED_BODY : WEB_DEFAULTS_SEED_BODY;
+}
+
+function injectWebDefaults(html, harness) {
   if (html.includes("aimgr-web-defaults")) return html; // idempotent
-  const tag = `<script>${WEB_DEFAULTS_SEED_BODY}</script>`;
+  const tag = `<script>${webDefaultsSeedFor(harness)}</script>`;
   if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + tag);
   return tag + html;
 }
@@ -172,10 +176,19 @@ function shimCspHeaders(outH, body) {
   const hash = hashForBody(want);
   const csp = outH["content-security-policy"];
   if (typeof csp !== "string" || csp.includes(hash)) return;
-  outH["content-security-policy"] = csp.replace(
-    /script-src[^;]*/,
-    (m) => `${m} 'sha256-${hash}'`
-  );
+  // Opencode-family backends serve script-src — the hash lands where inline
+  // scripts are governed (default-src fallback kept for servers without it).
+  if (/script-src[^;]*/.test(csp)) {
+    outH["content-security-policy"] = csp.replace(
+      /script-src[^;]*/,
+      (m) => `${m} 'sha256-${hash}'`
+    );
+  } else if (/default-src[^;]*/.test(csp)) {
+    outH["content-security-policy"] = csp.replace(
+      /default-src[^;]*/,
+      (m) => `${m} 'sha256-${hash}'`
+    );
+  }
 }
 
 function targetForSession(sess) {
@@ -184,19 +197,27 @@ function targetForSession(sess) {
   return { host: "127.0.0.1", port: sess.port };
 }
 
-// Immutable static assets: opencode serves its bundle as content-hashed
-// `/_assets/<hash>-<name>.js|css` URLs, so a year-long immutable cache is
-// safe and kills ~160 requests per cold switch. This matters most over the
-// tunnel (each request pays ~250-800ms WAN RTT): after the first load the
-// browser revalidates nothing and a switch costs doc + API only. Never
-// applied to API/HTML/SSE — only hashed-asset GETs.
+// Immutable static assets: content-hashed bundle URLs (`/_assets/<hash>-<name>`
+// for opencode-family builds, `/assets/<name>-<hash>.js|css` for vite builds), so a
+// year-long immutable cache is safe and kills ~160 requests per cold switch.
+// This matters most over the tunnel (each request pays ~250-800ms WAN RTT):
+// after the first load the browser revalidates nothing and a switch costs
+// doc + API only. Never applied to API/HTML/SSE — only hashed-asset GETs.
 const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
 function isImmutableAsset(subPath, method) {
   if (method !== "GET") return false;
   const p = String(subPath || "").split("?")[0];
-  if (!p.startsWith("/_assets/")) return false;
-  const base = p.slice("/_assets/".length);
-  return base.length > 0 && !base.includes("/") && !base.startsWith(".");
+  if (p.startsWith("/_assets/")) {
+    const base = p.slice("/_assets/".length);
+    return base.length > 0 && !base.includes("/") && !base.startsWith(".");
+  }
+  if (p.startsWith("/assets/")) {
+    const base = p.slice("/assets/".length);
+    // Vite hashed bundle: <name>-<8+ alnum hash>.<js|css>
+    return base.length > 0 && !base.includes("/") && !base.startsWith(".") &&
+      /-[A-Za-z0-9_-]{8,}\.(js|css)$/.test(base);
+  }
+  return false;
 }
 
 function immutableAssetHeaders(outH) {
@@ -256,28 +277,6 @@ function configCacheSet(key, entry) {
   }
 }
 
-// dsh backends require ?token= upstream (printed at boot, captured by
-// sessions.js). Append when the client didn't supply one; the browser never
-// sees the secret — it travels manager→backend on loopback only.
-// dsh token query is single-phase: the first request exchanges ?token= for a
-// session cookie; REPEATING ?token= once the cookie exists re-triggers the
-// handshake (303 loop). So append the token only until the browser presents
-// the dsh session cookie. Match that cookie specifically: generic UI cookies
-// (aimgr_active, oc_locale, …) must NOT count, or the token is wrongly
-// skipped and dsh 401s.
-function hasBackendCookie(inHeaders) {
-  const raw = inHeaders["cookie"] || inHeaders["Cookie"] || "";
-  return String(raw)
-    .split(";")
-    .some((s) => /^\s*dsh-auth-/i.test(s));
-}
-
-function withToken(pathQs, token) {
-  if (!token) return pathQs;
-  if (/(^|[?&])token=/.test(pathQs)) return pathQs;
-  return pathQs + (pathQs.includes("?") ? "&" : "?") + "token=" + token;
-}
-
 // Resolve (session, subPath, setCookie) from a request URL.
 function resolveFromUrl(url) {
   const m = /^(\/harness\/|\/s\/)([^/]+)(\/.*)?$/.exec(url.split("?")[0]);
@@ -289,9 +288,7 @@ function resolveFromUrl(url) {
   return { sess, target: t, subPath: m[3] || "/", focus: true };
 }
 
-function sanitizeHeaders(inHeaders, target, opts) {
-  const skipForwarded = !!(opts && opts.skipForwarded);
-  const injectAuth = !(opts && opts.skipAuth);
+function sanitizeHeaders(inHeaders, target) {
   const out = {};
   for (const k of Object.keys(inHeaders)) {
     const lk = k.toLowerCase();
@@ -299,19 +296,20 @@ function sanitizeHeaders(inHeaders, target, opts) {
     out[k] = inHeaders[k];
   }
   out["host"] = `${target.host}:${target.port}`;
-  // dsh validates its auth cookie against the perceived host: forwarded
-  // headers make it see the manager origin instead of its own, breaking
-  // verification into a 303 loop. opencode needs them (server-key origin).
-  if (!skipForwarded) {
-    out["x-forwarded-proto"] = "http";
-    out["x-forwarded-host"] = inHeaders["host"] || "";
-    out["x-forwarded-for"] = inHeaders["x-forwarded-for"] || "";
-  }
-  // Auto-auth upstream `opencode serve` (v2 mandates Basic auth). The browser
-  // never supplies this; the manager holds the secret so new sessions open
-  // already connected to this host. Skipped for token-authed backends (dsh):
-  // a foreign Authorization header breaks their cookie verification.
-  if (injectAuth) {
+  out["x-forwarded-proto"] = "http";
+  out["x-forwarded-host"] = inHeaders["host"] || "";
+  out["x-forwarded-for"] = inHeaders["x-forwarded-for"] || "";
+  // Auto-auth upstream `serve` backends (v2 mandates Basic auth). The browser
+  // never supplies this; the manager holds one stable secret per backend
+  // family so new sessions open already connected to this host.
+  // Lazy require: sessions.js loads at request time (both modules settled),
+  // avoiding the load-time cycle (sessions requires proxy lazily too).
+  try {
+    const { chassisPort } = require("./sessions");
+    out["authorization"] = (typeof chassisPort === "function" && target.port === chassisPort())
+      ? require("./chassisAuth").authHeader()
+      : require("./opencodeAuth").authHeader();
+  } catch {
     try {
       out["authorization"] = require("./opencodeAuth").authHeader();
     } catch {}
@@ -320,7 +318,7 @@ function sanitizeHeaders(inHeaders, target, opts) {
 }
 
 // Strip only the manager's own session cookie from upstream responses;
-// backend cookies (e.g. dsh auth handshake) must survive (see above).
+// backend cookies must survive (backends may set their own login cookies).
 function stripAimgrCookie(outH) {
   const sc = outH["set-cookie"];
   if (!sc) return;
@@ -360,14 +358,18 @@ function withQueueDefault(method, upstreamPath, body) {
 }
 
 function proxyRequest(req, res, target, subPath, opts) {
+  // Opencode-family session roots get the route deep-link shim; the per-pane
+  // API scope applies to every web harness so concurrent iframes route /api
+  // + WS traffic explicitly instead of sharing one cookie.
   const shim = !!opts?.shimRoute && shouldShimRoute(subPath, req.method);
   const shimSessionId = shim && opts?.shimSessionId ? String(opts.shimSessionId) : null;
   const shimBody = shim ? shimBodyFor(shimSessionId) : null;
-  const scopeSessionId = shim && opts?.scopeSessionId ? String(opts.scopeSessionId) : null;
-  const scopeBody = shim ? apiScopeBodyFor(scopeSessionId) : null;
+  const harness = opts?.harness ? String(opts.harness) : "opencode";
+  const defaultsBody = webDefaultsSeedFor(harness);
+  const scopeSessionId = opts?.scopeSessionId ? String(opts.scopeSessionId) : null;
+  const scopeBody = scopeSessionId ? apiScopeBodyFor(scopeSessionId) : null;
   const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-  const tok = opts?.harnessToken && !hasBackendCookie(req.headers) ? opts.harnessToken : null;
-  const upstreamPath = withToken(subPath + qs, tok);
+  const upstreamPath = subPath + qs;
   // Any /api mutation invalidates the config cache (model installs, config
   // edits, …). Over-broad on purpose: mutations are rare, staleness is not.
   if (req.method !== "GET" && String(subPath || "").split("?")[0].startsWith("/api/")) {
@@ -375,7 +377,7 @@ function proxyRequest(req, res, target, subPath, opts) {
   }
   // Config-GET fast path: serve a fresh entry with zero upstream I/O.
   const cacheKey = isCacheableApi(req.method, subPath) ? configCacheKey(subPath, qs) : null;
-  if (cacheKey && !opts?.harnessToken) {
+  if (cacheKey) {
     const hit = configCacheGet(cacheKey);
     if (hit) {
       const h = { ...hit.headers, "cache-control": CONFIG_BROWSER_CACHE, "x-aimgr-cache": "HIT", "content-length": String(hit.body.length) };
@@ -387,13 +389,11 @@ function proxyRequest(req, res, target, subPath, opts) {
       return;
     }
   }
-  // harnessToken is only ever set for dsh sessions (opencode uses Basic auth
-  // + harnessSessionId), so its presence selects the dsh header policy above.
-  const tokenAuthed = !!opts?.harnessToken;
-  const headers = sanitizeHeaders(req.headers, target, { skipForwarded: tokenAuthed, skipAuth: tokenAuthed });
-  // Shim path needs string surgery: force identity encoding so the upstream
-  // body arrives uncompressed.
-  if (shim) delete headers["accept-encoding"];
+  const headers = sanitizeHeaders(req.headers, target);
+  // Injected-script path needs string surgery: force identity encoding so the
+  // upstream body arrives uncompressed.
+  const inject = !!(shim || scopeBody);
+  if (inject) delete headers["accept-encoding"];
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
@@ -410,18 +410,17 @@ function proxyRequest(req, res, target, subPath, opts) {
     };
     const up = http.request(upOpts, (upRes) => {
       const outH = { ...upRes.headers };
-      // Backends must not override our session cookie, but their own cookies
-      // (e.g. dsh's login session from its 303 handshake) must pass through —
-      // stripping all set-cookie broke dsh into a redirect loop.
+      // Backends must not override our session cookie; their own cookies
+      // pass through untouched.
       stripAimgrCookie(outH);
-      if (!shim) {
+      if (!inject) {
         // Hashed bundle assets cache for a year (see isImmutableAsset);
         // config GETs fill the short-TTL cache (buffered: they are KBs);
         // everything else streams through untouched (SSE must never buffer).
         if (upRes.statusCode === 200 && isImmutableAsset(subPath, req.method)) {
           immutableAssetHeaders(outH);
         }
-        if (cacheKey && !opts?.harnessToken && upRes.statusCode === 200 && req.method === "GET") {
+        if (cacheKey && upRes.statusCode === 200 && req.method === "GET") {
           const bufs = [];
           upRes.on("data", (c) => bufs.push(c));
           upRes.on("end", () => {
@@ -446,21 +445,37 @@ function proxyRequest(req, res, target, subPath, opts) {
         upRes.pipe(res);
         return;
       }
+      // Scoped inject path: SSE streams forever, so it must stream — never
+      // buffer. The injections below are HTML-only; a non-HTML body forwards
+      // byte-identical anyway, so piping SSE through loses nothing and fixes
+      // /s/:id/api/event hanging indefinitely (buffered until upstream end,
+      // which an infinite SSE never sends).
+      const upCt = String((upRes.headers && upRes.headers["content-type"]) || "").toLowerCase();
+      if (upCt.includes("text/event-stream")) {
+        res.writeHead(upRes.statusCode, outH);
+        upRes.pipe(res);
+        return;
+      }
       const bufs = [];
       upRes.on("data", (c) => bufs.push(c));
       upRes.on("end", () => {
         let buf = Buffer.concat(bufs);
         const ct = String(outH["content-type"] || "");
         if (upRes.statusCode === 200 && ct.includes("text/html")) {
-          buf = Buffer.from(injectNoTitlebar(injectWebDefaults(injectApiScope(injectRouteShim(buf.toString("utf8"), shimSessionId), scopeSessionId))), "utf8");
-          shimCspHeaders(outH, shimBody);
-          shimCspHeaders(outH, WEB_DEFAULTS_SEED_BODY);
+          let h = buf.toString("utf8");
+          // Opencode-family chrome (route deep-link, defaults seed,
+          // titlebar hide) applies to session roots; the per-pane API
+          // scope is harness-agnostic and rides every web shell.
+          if (shim) h = injectNoTitlebar(injectWebDefaults(injectRouteShim(h, shimSessionId), harness));
+          buf = Buffer.from(injectApiScope(h, scopeSessionId), "utf8");
+          if (shimBody) shimCspHeaders(outH, shimBody);
+          if (shim) shimCspHeaders(outH, defaultsBody);
           if (scopeBody) shimCspHeaders(outH, scopeBody);
-          outH["content-length"] = String(buf.length);
-          // Upstream typically sends chunked; an explicit length must not
-          // coexist with transfer-encoding (strict downstream parsers fail).
-          delete outH["transfer-encoding"];
         }
+        outH["content-length"] = String(buf.length);
+        // Upstream typically sends chunked; an explicit length must not
+        // coexist with transfer-encoding (strict downstream parsers fail).
+        delete outH["transfer-encoding"];
         res.writeHead(upRes.statusCode, outH);
         res.end(buf);
       });
@@ -505,32 +520,18 @@ function explicitMiddleware(req, res, next) {
   if (r.focus) {
     res.setHeader("Set-Cookie", `aimgr_active=${r.sess.id}; Path=/; SameSite=Lax`);
   }
-  // dsh reads its access token from the *browser* URL (?token=) on boot; the
-  // app shell otherwise renders "authentication required". Redirect the
-  // session root once so the token is present for boot. Upstream injection
-  // alone is not enough. Later requests ride the dsh cookie (see withToken).
-  if (
-    req.method === "GET" &&
-    (r.subPath === "/" || r.subPath === "") &&
-    r.sess.harness === "dsh" &&
-    r.sess.harnessToken
-  ) {
-    const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-    if (!/(^|[?&])token=/.test(qs) && !hasBackendCookie(req.headers)) {
-      const pathOnly = req.url.split("?")[0];
-      res.writeHead(302, { Location: pathOnly + (qs ? "&" : "?") + "token=" + r.sess.harnessToken });
-      return res.end();
-    }
-  }
+  // Route shim is opencode-family-only (their SPAs own backend-native routes);
+  // chassis shares opencode's router, so it shims identically.
+  const isOpencodeFamily = r.sess && (r.sess.harness === "opencode" || r.sess.harness === "chassis");
   proxyRequest(req, res, r.target, r.subPath, {
-    shimRoute: true,
+    shimRoute: isOpencodeFamily,
     // Deep-link straight into the pre-created chat: the workspace is already
-    // chosen in ai-manager, so opencode must not ask for a project again.
-    shimSessionId: (r.sess && r.sess.harnessSessionId) || null,
+    // chosen in ai-manager, so the backend must not ask for a project again.
+    shimSessionId: (isOpencodeFamily && r.sess && r.sess.harnessSessionId) || null,
+    harness: (r.sess && r.sess.harness) || "opencode",
     // Per-pane API scoping (split-screen): embeds the manager session id so
     // concurrent iframes route their /api + WS traffic explicitly.
     scopeSessionId: (r.sess && r.sess.id) || null,
-    harnessToken: (r.sess && r.sess.harnessToken) || null,
   });
 }
 
@@ -544,9 +545,7 @@ function fallbackMiddleware(req, res, next) {
   const t = targetForSession(sess);
   if (!t) return next();
   const subPath = req.url.split("?")[0] || "/";
-  proxyRequest(req, res, t, subPath, {
-    harnessToken: (sess && sess.harnessToken) || null,
-  });
+  proxyRequest(req, res, t, subPath, {});
 }
 
 // Raw-socket forward for Upgrade requests (backend web UIs that use WS).
@@ -556,10 +555,8 @@ function handleUpgrade(req, socket, head, server) {
     const t = sess ? targetForSession(sess) : null;
     if (!t) { try { socket.destroy(); } catch {} return; }
     const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-    const sessTok = sess && sess.harnessToken && !hasBackendCookie(req.headers) ? sess.harnessToken : null;
-    const lines = [`${req.method} ${withToken(subPath + qs, sessTok)} HTTP/1.1`];
-    const tokUp = !!(sess && sess.harnessToken);
-    const headers = sanitizeHeaders(req.headers, t, { skipForwarded: tokUp, skipAuth: tokUp });
+    const lines = [`${req.method} ${subPath + qs} HTTP/1.1`];
+    const headers = sanitizeHeaders(req.headers, t);
     delete headers["content-length"];
     for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
     lines.push("", "");
@@ -581,4 +578,4 @@ function handleUpgrade(req, socket, head, server) {
   try { socket.destroy(); } catch {}
 }
 
-module.exports = { explicitMiddleware, fallbackMiddleware, handleUpgrade, parseCookies, proxyRequest, resolveFromUrl, targetForSession, isManagerApiPath, apiBackendMiddleware, shouldShimRoute, injectRouteShim, injectWebDefaults, injectNoTitlebar, injectApiScope, apiScopeBodyFor, shimCspHeaders, shimBodyFor, hashForBody, withToken, hasBackendCookie, stripAimgrCookie, withQueueDefault, isImmutableAsset, immutableAssetHeaders, IMMUTABLE_CACHE, isCacheableApi, configCacheKey, configCacheSet, CONFIG_CACHE_TTL_MS, CONFIG_BROWSER_CACHE, _clearConfigCacheForTest, ROUTE_SHIM_HASH, ROUTE_SHIM_BODY, WEB_DEFAULTS_SEED_BODY, NO_TITLEBAR_CSS };
+module.exports = { explicitMiddleware, fallbackMiddleware, handleUpgrade, parseCookies, proxyRequest, resolveFromUrl, targetForSession, isManagerApiPath, apiBackendMiddleware, shouldShimRoute, injectRouteShim, injectWebDefaults, webDefaultsSeedFor, injectNoTitlebar, injectApiScope, apiScopeBodyFor, shimCspHeaders, shimBodyFor, hashForBody, stripAimgrCookie, withQueueDefault, isImmutableAsset, immutableAssetHeaders, IMMUTABLE_CACHE, isCacheableApi, configCacheKey, configCacheSet, CONFIG_CACHE_TTL_MS, CONFIG_BROWSER_CACHE, _clearConfigCacheForTest, ROUTE_SHIM_HASH, ROUTE_SHIM_BODY, WEB_DEFAULTS_SEED_BODY, CHASSIS_DEFAULTS_SEED_BODY, NO_TITLEBAR_CSS };

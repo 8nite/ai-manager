@@ -1,7 +1,7 @@
 ---
 name: manager-proxy-remote
 description: ai-manager tunnel-proxy fixes for remote web harnesses (2026-10-09)
-date_modified: 2026-10-24
+date_modified: 2026-10-31
 tags: [ai-manager, proxy, tunnel, regression-tests]
 links: [[opencode-v2-web]], [[prod-web-testing]]
 ---
@@ -336,3 +336,119 @@ time anyway):
   413); 30 MB still 413s. No `scripts/build-configmap.sh` exists despite
   deploy.yaml referencing it — the create/apply pipeline above is the
   procedure until that script is written.
+
+## 14. Scoped proxy buffered SSE forever; gateway fanned only /global/event (2026-10-31)
+
+Symptoms (remote): opencode UI live updates dead; `inFlight` 250–330 with one
+tunnel while every `/s/*/api/event` ended in `cleanup reason="request
+timeout" 3000xxms`; browsers then hit `Transport: Timed out` as the 300
+stuck SSE upstreams head-of-line-blocked the single tunnel WS. Local
+`curl /s/<id>/api/event` also hung with zero bytes for 30s+.
+
+Two layered root causes, both "SSE must never buffer":
+
+1. **Manager** (`src/server/proxy.js` `proxyRequest` inject path): the scoped
+   `/s/:id` + `/harness/:id` path (always `scopeSessionId`) buffered the whole
+   upstream body and replied only on upstream end — an infinite SSE never
+   ends, so `/api/event` hung forever. The `!inject` branch already streamed
+   (`SSE must never buffer` comment) but the inject branch didn't. Non-HTML
+   bodies forward byte-identical anyway (injection is HTML-only), so streaming
+   SSE loses nothing.
+   Fix: after `stripAimgrCookie`, if upstream `content-type` includes
+   `text/event-stream`, `writeHead` + `pipe` and return. Verified live:
+   headers + `server.connected` + `provider.updated`/`model.updated` events
+   stream immediately through `/s/<id>/api/event`.
+   Test: `tests/proxy.test.js` "SSE streams through scoped inject path
+   without buffering" — stub SSE backend that never ends, assert first chunk
+   arrives <3s via full `proxyRequest` with `scopeSessionId`. Gotcha: the
+   never-ending stub keeps the runner alive — `srv.closeAllConnections()`
+   before `srv.close()` in `finally`. E2E (`scripts/e2e-web-defaults.sh`
+   "scoped SSE streams instead of buffering forever" +
+   "pre-created backend chat carries agent+model"): same-style assertions
+   against the real scratch backend — 200 + `text/event-stream` headers
+   and `data:` bytes within ~18s of `curl -m` (pre-fix: zero bytes incl.
+   headers); bound chat already complete right after create (pre-fix:
+   bare — the missing-model-bar root cause, repaired server-side).
+2. **Gateway** (`k8s/ai-gateway/tunnel.js`): only `GET /global/event` fanned
+   out; opencode v2.2.2 has no `/global/event` (not in the binary) — its live
+   stream is `GET /api/event` (binary: `event.subscribe` "Volatile by
+   contract…"). Every iframe/tab opened its own 5-minute `pending` upstream
+   (~1 reconnect/sec × 300s TTL ≈ 300 inFlight).
+   Fix: `sseFanoutKeyForPath(reqPath)` normalizes `/global/event` and any
+   `*/api/event` (incl. `/s/<id>/`, `/harness/<id>/` prefixes, query
+   stripped) to a shared fan key; `sseFanout` map re-keyed per
+   `token + "\n" + normPath` (was per-token); all map accesses
+   (`response-end` delete, `ws` close teardown, last-subscriber-out,
+   timeout `cleanup` now also drops the map entry, `listSseFanouts` shows
+   `path`) updated; fanout upstreams carry `fanoutKey` and keep their
+   no-timeout behavior (only non-fanout requests get the 5min safety net).
+   Verified live post-deploy: `inFlight` 328 → 1–3, one `/api/event` fan
+   (`subs=4–6`, `upstreamLive=true`, bytes flowing).
+   Tests: `tests/gateway-tunnel.test.js` (new file) — key normalization unit
+   + two `/s/*/api/event` share one upstream (2 subs, 1 pending) + non-SSE
+   still opens separate upstreams. `DATA_FILE` pointed at a scratch dir
+   before require (db.js creates the file on load).
+   + greeting replay (same file): `extractServerGreeting` unit (single /
+   split / comment-prefixed frames, no-greeting null, 16 KB give-up cap),
+   `captureGreeting` split-frame assembly + `flushGreeting` write-once
+   semantics, and a full-stack test over a real client+`WebSocketServer`
+   pair driving `tunnel.setup` + `proxyHttp`: late subscribers receive the
+   cached greeting on attach with zero new upstream traffic (db
+   `createTunnelToken` for the scratch tunnel).
+
+Deploy notes: gateway code rides the `ai-manager-gateway-code` ConfigMap —
+`bash scripts/build-gateway-configmap.sh apply` (exists now) +
+`kubectl rollout restart deploy/ai-manager-gateway`; restart clears the
+stale in-memory `pending` (inFlight drops at once). Manager proxy fix went
+through the standard restart (backends adopted, PIDs identical). Full suite
+193/193 green (was 192). Prompt round-trip verified post-fix
+(`PING-OK-123`/`VERIFY-FIX-456` replies received, sessions cleaned up).
+
+## 15. Gateway rollout best practices (2026-10-31, scripted)
+
+`scripts/rollout-gateway.sh` (executable; `check` subcommand verifies only):
+preflight `/health` snapshot → ConfigMap rebuild+apply → `rollout restart`
+→ `rollout status --timeout` → settle loop (new pod boots, tunnel client
+reconnects on backoff, browsers re-fan) → post-verify → `rollout undo` on
+any failure. Verify bar: `tunnelConnected:true`, `tunnels>=1`,
+`inFlight<=50` (`INFLIGHT_MAX` env; storm was 250–330, healthy is 1–8 —
+fanout subscribers don't count, only upstreams).
+
+Rules that bit (all observed live this session):
+- Deploy when the remote user is idle: the manager restart drops local
+  `:4000` for seconds (tunnel 502s mid-flight); the gateway rollout drops
+  in-flight SSE (browsers auto-reconnect, one `aborted` burst in the tunnel
+  log is normal). The user felt both as "remote UI times out".
+- Refuse while e2e runs: the script aborts if `e2e-web-defaults.sh` is
+  in flight (bash reads that script incrementally; a mid-run world change
+  corrupts parsing and flakes timing asserts). Same reason never to run
+  the prod browser pass concurrently with e2e (agent-browser is
+  profile-singleton — lost cookies, phantom login walls).
+- `check` mode is read-only (`curl /health` only) — safe anytime, use it
+  as the first probe for any "remote is down" report before touching the
+  cluster.
+- Do NOT roll out while a prod browser test drives the gateway (same
+  restart-window 502s would fail its run and waste billed turns).
+
+## 16. Gateway replays server.connected to late fanout subscribers (2026-10-31)
+
+Symptom (remote only): an opencode session shows no model bar (bare
+composer, no picker/variant) even though its backend chat has agent+model.
+Local (`:4000`) always renders it. Cause: the web UI initializes its model
+picker (and the /api/model+ suite fetch) from the `server.connected`
+greeting, which the backend emits once per NEW /api/event subscription.
+The §14 fanout gives the greeting to the first subscriber only — every
+later attach (reconnect, new tab, navigation) initializes nothing: no
+picker, no /api/model fetch at all (verified: full fetch list with zero
+model/provider/agent calls). Local works because each browser holds its
+own backend stream and always gets greeted.
+
+Fix (`k8s/ai-gateway/tunnel.js`): cache the first complete
+`server.connected` frame from the upstream (`extractServerGreeting` pure +
+`captureGreeting` rolling 16 KB buffer, split-frame safe) and replay it
+byte-identical to every late subscriber right after its headers
+(`flushGreeting`, per-sub `greeted` flag so each gets exactly one copy).
+Restores exact per-connection semantics; the app already handles repeated
+greetings (its normal reconnect life pre-fanout). Observed proof after
+deploy: fresh remote loads fetch the suite and render the bar.
+`listSseFanouts` gained `hasGreeting` for visibility.

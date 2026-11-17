@@ -16,8 +16,8 @@ Supported harnesses (v0.1):
 
 | Harness | Backend | How it runs |
 |---|---|---|
-| `opencode` | web UI | `opencode serve --port <auto>` in the workspace dir, shown in an iframe |
-| `dsh` (deepseek-harness) | terminal (one-shot CLI) | `dsh headless "<goal>"` (via `npx -y @deepseek-ai/dsh`) in the workspace dir, streamed to xterm.js; Resume re-runs the goal |
+| `opencode` | web UI | `opencode serve --port <auto>` (one shared daemon), shown in an iframe |
+| `chassis` | web UI | `chassis serve --port <auto>` (one shared daemon), shown in an iframe |
 | `droid` | terminal UI | `droid` PTY in the workspace dir, rendered with xterm.js in the main window |
 | `agy` (antigravity) | terminal UI | `agy` PTY in the workspace dir (default model `gemini-3.8-flash-high`), rendered with xterm.js in the main window |
 
@@ -31,10 +31,8 @@ client on this machine and open `https://ai-manager.nexvision.cc`
 - Node.js 20+
 - `opencode` on `PATH` (for opencode sessions)
 - `droid` on `PATH` (for droid sessions)
+- `chassis` on `PATH` (for chassis sessions)
 - `agy` on `PATH` (for agy sessions; Antigravity CLI, signed in)
-- For `dsh` sessions: network access to npm (runs `npx -y @deepseek-ai/dsh`),
-  plus a DeepSeek API key (`DEEPSEEK_API_KEY` env or dsh credentials store).
-  New dsh sessions require a goal — it becomes the one-shot `headless` task.
 
 ## Run locally
 
@@ -53,7 +51,8 @@ Env vars:
 | `AI_MGR_HARNESS_BASE_PORT` | `4100` | first auto-allocated harness port |
 | `OPENCODE_BIN` | `opencode` | opencode binary |
 | `DROID_BIN` | `droid` | droid binary (+ `DROID_ARGS`) |
-| `DSH_BIN` | `npx` | dsh launcher (+ `DSH_ARGS` full argv override, default `-y @deepseek-ai/dsh headless`) |
+| `CHASSIS_BIN` | `chassis` | chassis binary (spawned as `serve --hostname 127.0.0.1 --port <AI_MGR_CHASSIS_PORT>`; stable manager-held `CHASSIS_SERVER_PASSWORD`, separate from the opencode one) |
+| `AI_MGR_CHASSIS_PORT` | `AI_MGR_HARNESS_BASE_PORT - 11` | shared chassis daemon port (one daemon hosts all chassis sessions) |
 | `AGY_BIN` | `agy` | agy binary (+ `AGY_MODEL` default `gemini-3.8-flash-high`, `AGY_ARGS` full argv override) |
 | `AI_MGR_SHELL` | auto | console shell (`powershell.exe` on win32, else `bash`) |
 | `AI_MGR_OPENCODE_PASSWORD` | `~/.ai-manager/opencode-password` (generated) | stable password for per-session `opencode serve`; proxy injects it so new sessions auto-connect locally |
@@ -108,9 +107,8 @@ PTY sessions (droid, consoles) report live activity in `/api/state`:
 | `waiting` | quiet longer — likely needs your input (amber pulse + NEEDS YOU shelf) |
 | `finished` | PTY exited |
 
-Web sessions (opencode) report process status only (`running`,
-`starting`, `error`, `finished`) — the manager can't see inside their
-iframes.
+Web sessions (opencode, chassis) report backend-polled activity (`working`,
+`waiting`, `running`, …).
 
 ## API (v0.1)
 
@@ -138,7 +136,7 @@ src/server/  manager HTTP server (express, no build step)
   index.js     wiring: static + api + proxy + pty streams
   store.js     JSON persistence (workspaces + sessions)
   sessions.js  session/console lifecycle + port allocation
-  backends.js  harness definitions (opencode web, dsh/droid/agy pty)
+  backends.js  harness definitions (opencode/chassis web, droid/agy pty)
   proxy.js     /harness + /s reverse proxy (http + upgrade)
   pty.js       node-pty pool with backlog + SSE fanout
 src/public/  futuristic UI (vanilla JS, xterm.js via CDN)
@@ -158,10 +156,12 @@ tests/       smoke tests (node --test)
   after a server restart (or PTY exit) it respawns with `droid resume --last`
   (most recent session in that folder). Pass an explicit id via a future
   session setting if the folder hosts several droid conversations.
-- dsh runs one-shot (`headless`): no interactive follow-ups in-session —
-  Resume re-runs the goal; use `--session-id` via a future session setting
-  to continue a persisted run. Override the whole argv with
-  `DSH_BIN`/`DSH_ARGS` if upstream flags drift.
+- chassis sessions share one `chassis serve` daemon (adopted across manager
+  restarts so in-flight turns survive deploys). Chats persist in the backend
+  store; the manager pre-creates one chat per session bound to the
+  workspace dir and deep-links the iframe via the route shim. Stored
+  lumina sessions from before 2026-11-06 migrate to chassis on load
+  (port + chat binding reset; the next ensure backfills).
 - agy first boots plain interactive; respawns after an exit use
   `--continue` (most recent conversation *globally* — keep one agy session
   per workspace, or set an explicit conversation id to resume via

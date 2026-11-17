@@ -104,7 +104,7 @@ app.post("/api/sessions", async (req, res) => {
     // Pre-warm workspace config over loopback (never blocks the response):
     // the new session's iframe boots seconds later and its config calls
     // should hit the proxy cache instead of paying tunnel RTTs each.
-    if (s && s.harness === "opencode") {
+    if (s && (s.harness === "opencode" || s.harness === "chassis")) {
       sessions.prewarmSessionConfig(s.id).catch(() => {});
     }
   } catch (e) {
@@ -128,7 +128,7 @@ app.post("/api/sessions/:id/ensure", async (req, res) => {
     // before its iframe boots, rolling the 30s config TTL forward.
     try {
       const cur = sessions.sessionById(req.params.id);
-      if (cur && cur.harness === "opencode") sessions.prewarmSessionConfig(cur.id).catch(() => {});
+      if (cur && (cur.harness === "opencode" || cur.harness === "chassis")) sessions.prewarmSessionConfig(cur.id).catch(() => {});
     } catch {}
   } catch (e) {
     res.status(400).json({ error: String(e.message || e) });

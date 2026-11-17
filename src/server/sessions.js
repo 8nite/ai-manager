@@ -2,8 +2,9 @@
 //
 // Session: { id, workspaceId, harness, title, mode, port?, status,
 //            harnessSessionId?, createdAt, lastActiveAt }
-//   web sessions own a child process (opencode serve / dsh web) on a port.
-//   pty sessions (droid) own a node-pty keyed `session:<id>`.
+//   web sessions share one background daemon per harness family
+//   (opencode serve / chassis serve) on a fixed port.
+//   pty sessions (droid/agy) own a node-pty keyed `session:<id>`.
 // Console: { id, workspaceId, title, createdAt } — ephemeral node-pty
 //   keyed `console:<id>` running the user shell.
 
@@ -16,7 +17,6 @@ const { getHarness, BASE_PORT } = require("./backends");
 const pty = require("./pty");
 
 const _procs = new Map(); // sessionId -> ChildProcess (web backends)
-const _dshOut = new Map(); // sessionId -> recent stdout (for token capture)
 
 // Fast session-switch liveness cache: sessionId -> timestamp of the last
 // verified backend contact. Rapid switches (sidebar/palette clicks) hit this
@@ -38,26 +38,6 @@ function _clearAliveForTest() {
 // Dedupe concurrent ensures for the same session (rapid A->B->A clicks
 // share one probe instead of spawning parallel adopts).
 const _ensureInflight = new Map(); // sessionId -> Promise
-
-function dshTokenFrom(text) {
-  const m = /[?&]token=([A-Za-z0-9_-]{8,})/.exec(text || "");
-  return m ? m[1] : null;
-}
-
-function waitForDshToken(id, timeoutMs) {
-  return new Promise((resolve) => {
-    const hit = dshTokenFrom(_dshOut.get(id) || "");
-    if (hit) return resolve(hit);
-    const start = Date.now();
-    const iv = setInterval(() => {
-      const tok = dshTokenFrom(_dshOut.get(id) || "");
-      if (tok || Date.now() - start > timeoutMs) {
-        clearInterval(iv);
-        resolve(tok || null);
-      }
-    }, 250);
-  });
-}
 
 function uid(prefix) {
   return `${prefix}_${crypto.randomBytes(6).toString("hex")}`;
@@ -256,6 +236,179 @@ async function migrateToShared(id) {
   return sessionById(id);
 }
 
+// ---- shared chassis backend ----
+//
+// One `chassis serve` hosts EVERY manager chassis session (POST /api/session
+// per manager session), mirroring the opencode shared backend above:
+// per-session daemons would each pay a full boot + hold redundant processes.
+// Chassis chats persist in its global store (same core as opencode), so
+// adoption across manager restarts is safe. Auth is a stable manager-held
+// Basic password (see chassisAuth.js), selected per-port in backendApi.
+// ponytail: one fixed port, not a pool.
+function chassisPort() {
+  const fixed = parseInt(process.env.AI_MGR_CHASSIS_PORT || "", 10);
+  if (Number.isFinite(fixed) && fixed > 0) return fixed;
+  const base = parseInt(process.env.AI_MGR_HARNESS_BASE_PORT || String(BASE_PORT), 10);
+  const b = Number.isFinite(base) && base > 0 ? base : BASE_PORT;
+  return b - 11;
+}
+
+function isSharedChassis(sess) {
+  return !!sess && sess.harness === "chassis" && sess.mode === "web";
+}
+
+// Chassis + opencode share one API shape (/api/session, /api/info,
+// /api/session/active); only the Basic secret differs per backend port.
+function isOpencodeFamily(sess) {
+  return !!sess && (sess.harness === "opencode" || sess.harness === "chassis") && sess.mode === "web";
+}
+
+let _sharedChassisProc = null; // ChildProcess for the shared chassis backend
+let _sharedChassisPid = null; // backend pid (spawned or adopted)
+let _sharedChassisStarting = null; // dedupe concurrent boots
+function _sharedChassisProcAlive() {
+  try {
+    return !!_sharedChassisProc && !_sharedChassisProc.killed &&
+      (_sharedChassisProc.exitCode === null || _sharedChassisProc.exitCode === undefined);
+  } catch {
+    return false;
+  }
+}
+function _resetSharedChassisForTest() {
+  _sharedChassisProc = null;
+  _sharedChassisPid = null;
+  _sharedChassisStarting = null;
+}
+
+function sharedChassisLogFd() {
+  const fs = require("fs");
+  const os = require("os");
+  const dir = path.join(os.homedir(), ".ai-manager", "backend-logs");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "shared-chassis.log");
+  try {
+    const st = fs.statSync(file, { throwIfNoEntry: false });
+    if (st && st.size > 5 * 1024 * 1024) fs.unlinkSync(file);
+  } catch {}
+  return fs.openSync(file, "a");
+}
+
+// Adoption probe for a chassis daemon: TCP answers AND /api/info answers
+// with a chassis-shaped JSON payload ({pid, version, ...}). A bare 2xx is
+// NOT enough: unrelated servers (e.g. the retired lumina daemon, which
+// serves its SPA shell with 200 for unknown paths) must never be adopted.
+// Best-effort, never throws.
+async function tryAdoptChassis(port, timeoutMs) {
+  const to = timeoutMs || 2000;
+  if (!(await probePortOnce("127.0.0.1", port, to))) return false;
+  try {
+    const info = await backendApi(port, "GET", "/api/info", null, to);
+    if (!info || typeof info !== "object" || (!info.pid && !info.version)) return false;
+  } catch {
+    return false; // TCP answers but not our daemon API — don't touch it
+  }
+  return true;
+}
+
+// Retire the pre-chassis lumina daemon when it still holds the chassis
+// port: SIGTERM only processes whose cmdline is a `lumina serve` bound to
+// exactly this port, then wait for the port to free. Returns true when the
+// port is free afterwards. Never touches anything else; never throws.
+async function reclaimLuminaPort(port) {
+  const { execSync } = require("child_process");
+  let rows = "";
+  try {
+    rows = execSync("ps -eo pid,args", { timeout: 5000 }).toString();
+  } catch {
+    return false;
+  }
+  let killed = false;
+  for (const line of rows.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = parseInt(m[1], 10);
+    const args = m[2];
+    if (pid === process.pid) continue;
+    if (!/\blumina\b/.test(args) || !/\bserve\b/.test(args)) continue;
+    if (!args.includes(String(port))) continue;
+    try {
+      process.kill(pid, "SIGTERM");
+      killed = true;
+      process.stderr.write(`[shared-chassis] retired stale lumina daemon pid=${pid} on port ${port}\n`);
+    } catch {}
+  }
+  if (!killed) return !(await probePortOnce("127.0.0.1", port, 750));
+  const start = Date.now();
+  while (Date.now() - start < 8000) {
+    if (!(await probePortOnce("127.0.0.1", port, 500))) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+// Ensure the one shared chassis backend is up; returns its port.
+// Adopt-or-spawn like ensureSharedBackend; concurrent callers share one boot.
+async function ensureSharedChassis(cwdHint) {
+  if (_sharedChassisProcAlive()) return chassisPort();
+  if (_sharedChassisStarting) return _sharedChassisStarting;
+  _sharedChassisStarting = _ensureSharedChassisInner(cwdHint).finally(() => { _sharedChassisStarting = null; });
+  return _sharedChassisStarting;
+}
+
+async function _ensureSharedChassisInner(cwdHint) {
+  const port = chassisPort();
+  try {
+    if (await tryAdoptChassis(port)) {
+      try {
+        const info = await backendApi(port, "GET", "/api/info", null, 2000);
+        if (info && info.pid) {
+          _sharedChassisPid = info.pid;
+          for (const s of store.getSessions()) {
+            if (s.port === port) store.updateSession(s.id, { backendPid: info.pid });
+          }
+        }
+      } catch {}
+      return port;
+    }
+  } catch (e) {
+    process.stderr.write(`[shared-chassis] adopt failed, spawning fresh: ${e && e.message}\n`);
+  }
+  const h = getHarness("chassis");
+  const bin = h.bin();
+  const args = h.args(port);
+  const os = require("os");
+  // Port held by a non-chassis occupant (the retired lumina daemon lives on
+  // this offset): retire it first so the spawn can bind. A live chassis
+  // daemon would have been adopted above, so anything still here is foreign.
+  if (await probePortOnce("127.0.0.1", port, 750)) {
+    await reclaimLuminaPort(port);
+  }
+  let logFd = null;
+  try { logFd = sharedChassisLogFd(); } catch { logFd = null; }
+  const stdio = logFd === null ? ["ignore", "ignore", "ignore"] : ["ignore", logFd, logFd];
+  const proc = spawn(bin, args, { cwd: cwdHint || os.homedir(), stdio, env: { ...process.env, ...h.env() } });
+  if (logFd !== null) { try { require("fs").closeSync(logFd); } catch {} }
+  try { proc.unref(); } catch {}
+  _sharedChassisProc = proc;
+  if (proc.pid) {
+    _sharedChassisPid = proc.pid;
+    for (const s of store.getSessions()) {
+      if (s.port === port) store.updateSession(s.id, { backendPid: proc.pid });
+    }
+  }
+  proc.on("exit", () => {
+    if (_sharedChassisProc === proc) _sharedChassisProc = null;
+  });
+  try {
+    await waitForPort("127.0.0.1", port, 20000);
+  } catch (e) {
+    try { proc.kill("SIGTERM"); } catch {}
+    if (_sharedChassisProc === proc) _sharedChassisProc = null;
+    throw e;
+  }
+  return port;
+}
+
 function waitForPort(host, port, timeoutMs) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -407,9 +560,9 @@ async function createSession(workspaceId, harness, title) {
     harness,
     title: title || `${h.label} · ${ws.name}`,
     mode: h.mode,
-    // Opencode sessions share the one background backend (chats via API);
-    // only other web harnesses allocate a private port.
-    port: h.mode === "web" ? (harness === "opencode" ? sharedPort() : allocPort()) : null,
+    // Web harnesses share one background daemon each (chats via API);
+    // only non-shared web harnesses allocate a private port.
+    port: h.mode === "web" ? (harness === "chassis" ? chassisPort() : sharedPort()) : null,
     status: "starting",
     harnessSessionId: null,
     createdAt: Date.now(),
@@ -439,13 +592,12 @@ async function startSession(id) {
   }
   const h = getHarness(sess.harness);
   if (sess.mode !== h.mode) {
-    // Harness changed modes across versions (dsh web→pty): adopt the current
-    // mode instead of booting stale web state with CLI args.
+    // Harness changed modes across versions: adopt the current
+    // mode instead of booting stale state with mismatched args.
     killSessionProc(sess.id);
     store.updateSession(id, {
       mode: h.mode,
       port: h.mode === "web" ? allocPort() : null,
-      harnessToken: null,
       error: null,
     });
     sess = sessionById(id);
@@ -468,6 +620,27 @@ async function startSession(id) {
         process.stderr.write(`[${id}] harness session pre-create failed: ${e.message}\n`);
       }
       store.updateSession(id, { status: "running", error: null, backendPid: _sharedPid || (cur && cur.backendPid) });
+      markAlive(id);
+      return sessionById(id);
+    }
+    if (sess.harness === "chassis") {
+      // Shared chassis daemon: one `chassis serve` for all chassis sessions
+      // (see ensureSharedChassis). Chats persist in the backend store, so
+      // adoption across restarts is safe; repoint legacy ports outright
+      // (no /active drain to protect on first boot — chassis turns are
+      // server-side like opencode's).
+      await ensureSharedChassis(ws.path);
+      let cur = sessionById(id);
+      if (cur && cur.port !== chassisPort()) {
+        store.updateSession(id, { port: chassisPort(), backendPid: _sharedChassisPid || null });
+        cur = sessionById(id);
+      }
+      try {
+        await ensureHarnessSession(id);
+      } catch (e) {
+        process.stderr.write(`[${id}] chassis session pre-create failed: ${e.message}\n`);
+      }
+      store.updateSession(id, { status: "running", error: null, backendPid: _sharedChassisPid || (cur && cur.backendPid) });
       markAlive(id);
       return sessionById(id);
     }
@@ -600,8 +773,6 @@ async function startWeb(sess, ws, h) {
     process.stderr.write(`[${sess.id}] backend adopt failed, spawning fresh: ${e && e.message}\n`);
   }
   killSessionProc(sess.id);
-  _dshOut.delete(sess.id);
-  if (sess.harness === "dsh") store.updateSession(sess.id, { harnessToken: null });
   const bin = h.bin();
   const args = h.args(sess.port);
   // File stdio (not pipes): the backend must survive the manager exiting, and
@@ -616,16 +787,6 @@ async function startWeb(sess, ws, h) {
   try { proc.unref(); } catch {}
   _procs.set(sess.id, proc);
   if (proc.pid) store.updateSession(sess.id, { backendPid: proc.pid });
-  if (proc.stdout) {
-    _dshOut.set(sess.id, "");
-    proc.stdout.on("data", (c) => {
-      process.stdout.write(`[${sess.id}] ${c}`);
-      if (sess.harness === "dsh") {
-        const buf = (_dshOut.get(sess.id) || "") + String(c);
-        _dshOut.set(sess.id, buf.slice(-4096));
-      }
-    });
-  }
   if (proc.stderr) proc.stderr.on("data", (c) => process.stderr.write(`[${sess.id}] ${c}`));
   proc.on("exit", (code) => {
     if (_procs.get(sess.id) === proc) _procs.delete(sess.id);
@@ -636,27 +797,16 @@ async function startWeb(sess, ws, h) {
     }
   });
   // Adopt-or-wait: if something already answers on the port, adopt it.
-  // Boot window is per-harness: dsh cold-starts via npx (can exceed 60s).
   try {
     await waitForPort("127.0.0.1", sess.port, (h && h.bootTimeoutMs) || 20000);
   } catch (e) {
     killSessionProc(sess.id);
     throw e;
   }
-  // dsh prints its access token to stdout (`?token=…`, required upstream —
-  // the browser must never see it). Capture and store for proxy injection.
-  if (sess.harness === "dsh") {
-    try {
-      const tok = await waitForDshToken(sess.id, 15000);
-      if (tok) store.updateSession(sess.id, { harnessToken: tok });
-    } catch (e) {
-      process.stderr.write(`[${sess.id}] dsh token capture failed: ${e.message}\n`);
-    }
-  }
-  // Opencode backends: pre-create a chat session bound to the workspace
+  // Opencode-family backends: pre-create a chat session bound to the workspace
   // directory so the iframe lands directly in chat (no project picker).
   // Best-effort: picker fallback when this fails.
-  if (sess.harness === "opencode") {
+  if (sess.harness === "opencode" || sess.harness === "chassis") {
     try {
       await ensureHarnessSession(sess.id);
     } catch (e) {
@@ -666,10 +816,13 @@ async function startWeb(sess, ws, h) {
   markAlive(sess.id);
 }
 
-// Opencode chat pre-create (per manager session, bound to workspace dir).
+// Opencode-family chat pre-create (per manager session, bound to workspace dir).
 // Verifies a stored harnessSessionId, recreates on 404. Returns the live id
 // or null. Exported for tests.
-function backendAuthHeader() {
+function backendAuthHeader(port) {
+  try {
+    if (port === chassisPort()) return require("./chassisAuth").authHeader();
+  } catch {}
   try {
     return require("./opencodeAuth").authHeader();
   } catch {
@@ -682,7 +835,7 @@ function backendApi(port, method, apiPath, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : null;
     const headers = { "Content-Type": "application/json" };
-    const ah = backendAuthHeader();
+    const ah = backendAuthHeader(port);
     if (ah) headers["Authorization"] = ah;
     if (data) headers["Content-Length"] = String(data.length);
     const req = http.request(
@@ -715,13 +868,17 @@ function backendApi(port, method, apiPath, body, timeoutMs) {
 
 async function ensureHarnessSession(id) {
   const sess = sessionById(id);
-  if (!sess || sess.harness !== "opencode" || !sess.port) return null;
+  if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || !sess.port) return null;
   const ws = workspaceById(sess.workspaceId);
   if (!ws) return null;
   if (sess.harnessSessionId) {
     try {
-      await backendApi(sess.port, "GET", `/api/session/${sess.harnessSessionId}`);
+      const existing = await backendApi(sess.port, "GET", `/api/session/${sess.harnessSessionId}`);
       markAlive(id);
+      // Best-effort: a chat without agent/model renders a composer with no
+      // model bar (verified live 2026-10-31). Repair before handing over.
+      // Awaited: zero extra I/O when already complete (known data passed).
+      await repairBareHarnessSession(id, existing && existing.data);
       return sess.harnessSessionId;
     } catch (e) {
       if (!e || e.status !== 404) return sess.harnessSessionId; // transient — keep
@@ -749,7 +906,77 @@ async function ensureHarnessSession(id) {
   if (!hid) throw lastErr || new Error("backend session create returned no id");
   store.updateSession(id, { harnessSessionId: hid });
   markAlive(id);
+  // Fresh chats come back bare (no agent/model) — repair from the backend's
+  // own defaults so the composer boots with its model bar.
+  await repairBareHarnessSession(id, null);
   return hid;
+}
+
+// A backend chat without agent/model renders a composer with no model bar.
+// The backend only sometimes fills defaults on POST /api/session (4/21 live
+// chats bare 2026-10-31, all manager-created), so repair best-effort from
+// the backend's own defaults: POST <chat>/agent {agent} (204) and
+// POST <chat>/model {model:{id,providerID}} (204; backend resolves variant).
+// `known` skips the re-fetch when the caller already holds the record.
+// Never throws; returns true when nothing was missing (or nothing to do).
+async function repairBareHarnessSession(id, known) {
+  try {
+    const sess = sessionById(id);
+    if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || !sess.port || !sess.harnessSessionId) return false;
+    let data = known || null;
+    if (!data) {
+      const remote = await backendApi(sess.port, "GET", `/api/session/${sess.harnessSessionId}`, null, 2000);
+      data = (remote && remote.data) || {};
+    }
+    if (data.agent && data.model) return true;
+    const ws = workspaceById(sess.workspaceId);
+    const dir = ws && ws.path;
+    const q = dir ? `?location%5Bdirectory%5D=${encodeURIComponent(dir)}` : "";
+    // Defaults can lag the backend boot (cold provider init 503s/timeouts on
+    // a fresh backend). Creation already waited for the port, but model/agent
+    // resolution trails behind it — retry briefly, slow path only.
+    let modelId = null;
+    let modelProvider = null;
+    let agentId = null;
+    for (let attempt = 0; attempt < 4 && (!modelId || !agentId); attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+      if (!modelId && q) {
+        try {
+          const md = await backendApi(sess.port, "GET", `/api/model/default${q}`, null, 2000);
+          const mdd = md && md.data;
+          modelId = (mdd && (mdd.id || mdd.modelID)) || null;
+          modelProvider = (mdd && mdd.providerID) || null;
+        } catch {}
+      }
+      if (!agentId) {
+        try {
+          const al = await backendApi(sess.port, "GET", "/api/agent", null, 2000);
+          const list = (al && al.data) || [];
+          const build = list.find((a) => a && a.id === "build");
+          agentId = (build && build.id) || (list[0] && list[0].id) || null;
+        } catch {}
+      }
+    }
+    if (!data.agent && agentId) {
+      try {
+        await backendApi(sess.port, "POST", `/api/session/${sess.harnessSessionId}/agent`, { agent: agentId }, 2000);
+      } catch (e) {
+        process.stderr.write(`[${id}] agent repair failed: ${e.message}\n`);
+      }
+    }
+    if (!data.model && modelId) {
+      const modelBody = { id: modelId };
+      if (modelProvider) modelBody.providerID = modelProvider;
+      try {
+        await backendApi(sess.port, "POST", `/api/session/${sess.harnessSessionId}/model`, { model: modelBody }, 2000);
+      } catch (e) {
+        process.stderr.write(`[${id}] model repair failed: ${e.message}\n`);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Config pre-warm for opencode web sessions (see proxy.js config cache).
@@ -766,7 +993,7 @@ async function ensureHarnessSession(id) {
 const PREWARM_API_PATHS = ["project", "model", "provider", "integration", "config", "location", "vcs", "shell"];
 async function prewarmSessionConfig(id) {
   const sess = sessionById(id);
-  if (!sess || sess.harness !== "opencode" || sess.mode !== "web" || !sess.port) return false;
+  if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || sess.mode !== "web" || !sess.port) return false;
   const ws = workspaceById(sess.workspaceId);
   const dir = ws && ws.path;
   const paths = [];
@@ -823,11 +1050,11 @@ function isDefaultLikeTitle(sess) {
 
 // Harness title sync (backend → manager, best-effort, never throws).
 //
-// Opencode owns the title: its title agent renames the backend chat after the
-// first prompt, and the user can rename inside the opencode UI. The manager
-// pre-created that chat with its own title, so without a pull-back the left
-// panel keeps the stale creation title forever ("opencode · <ws>"). Pull the
-// backend title and adopt it when it is a real (non-default) title.
+// Opencode-family backends own the title: the title agent renames the chat
+// after the first prompt, and the user can rename inside the web UI. The
+// manager pre-created that chat with its own title, so without a pull-back
+// the left panel keeps the stale creation title forever. Pull the backend
+// title and adopt it when it is a real (non-default) title.
 //
 // Observed (2026-10-10, v2.0.26): the backend agent does NOT always rename —
 // a bound chat with a user "hi" + assistant replies kept the default title.
@@ -835,26 +1062,28 @@ function isDefaultLikeTitle(sess) {
 // default) AND the local title is still the creation default, derive from
 // the earliest user message ("hi" → "hi") for LOCAL display only. The
 // derivation is never pushed back: pushing would plant a non-default title
-// on the backend and pre-empt opencode's own title agent. Likewise a stale
+// on the backend and pre-empt the title agent. Likewise a stale
 // backend default never reverts a local derived/custom title.
 // Custom local titles are never derived over: the fallback only fires while
 // the local title is still default-like.
-// Skips non-opencode sessions and sessions without a bound chat. Overlong
+// Skips non-web sessions and sessions without a bound chat. Overlong
 // backend titles are truncated to RENAME_TITLE_MAX (UI sanity). Returns the
 // updated record, the current record when unchanged/skipped, or null when
 // the session is unknown or the backend fetch failed (transient — keep the
 // local title).
+// Harness title sync (backend → manager, best-effort, never throws).
 async function syncSessionTitle(id, timeoutMs) {
   const sess = sessionById(id);
-  if (!sess || sess.harness !== "opencode" || !sess.port || !sess.harnessSessionId) return sess || null;
+  if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || !sess.port || !sess.harnessSessionId) return sess || null;
   const to = timeoutMs || 2500;
+  const apiPath = `/api/session/${sess.harnessSessionId}`;
   let remote;
   try {
-    remote = await backendApi(sess.port, "GET", `/api/session/${sess.harnessSessionId}`, null, to);
+    remote = await backendApi(sess.port, "GET", apiPath, null, to);
   } catch {
     return null; // backend restarting/down — keep local title
   }
-  const raw = remote && remote.data && remote.data.title;
+  const raw = (remote && remote.data && remote.data.title) ?? (remote && remote.title);
   const t = String(raw ?? "").trim().replace(/\s+/g, " ");
   const backendIsDefault = !t || t === defaultTitleFor(sess) || (() => {
     try {
@@ -887,17 +1116,17 @@ async function syncSessionTitle(id, timeoutMs) {
   const next = first.length > RENAME_TITLE_MAX ? first.slice(0, RENAME_TITLE_MAX) : first;
   if (next === sess.title) return sess;
   // Local display only — never pushed: the backend copy stays default so
-  // opencode's own title agent can still fire and win on a later pull.
+  // the backend's own title agent can still fire and win on a later pull.
   return store.updateSession(id, { title: next });
 }
 
-// Sync every bound opencode chat concurrently. Best-effort: individual
+// Sync every bound web chat concurrently. Best-effort: individual
 // failures resolve to null and never reject the batch. Awaited by
 // GET /api/state + /api/sessions so the 8s sidebar poll picks up backend
 // auto-titles with no frontend change.
 async function syncAllSessionTitles(timeoutMs) {
   const targets = store.getSessions().filter(
-    (s) => s && s.harness === "opencode" && s.port && s.harnessSessionId
+    (s) => s && (s.harness === "opencode" || s.harness === "chassis") && s.port && s.harnessSessionId
   );
   if (!targets.length) return [];
   const out = await Promise.allSettled(targets.map((s) => syncSessionTitle(s.id, timeoutMs)));
@@ -910,9 +1139,10 @@ async function syncAllSessionTitles(timeoutMs) {
 // copy. Returns true on success, false when skipped or failed.
 async function pushTitleToHarness(id, timeoutMs) {
   const sess = sessionById(id);
-  if (!sess || sess.harness !== "opencode" || !sess.port || !sess.harnessSessionId) return false;
+  if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || !sess.port || !sess.harnessSessionId) return false;
+  const apiPath = `/api/session/${sess.harnessSessionId}`;
   try {
-    await backendApi(sess.port, "PATCH", `/api/session/${sess.harnessSessionId}`, { title: sess.title }, timeoutMs || 5000);
+    await backendApi(sess.port, "PATCH", apiPath, { title: sess.title }, timeoutMs || 5000);
     return true;
   } catch (e) {
     process.stderr.write(`[${id}] harness title push failed: ${e && e.message}\n`);
@@ -959,12 +1189,7 @@ function startPty(sess, ws, h) {
 //     ran meanwhile; keep one agy session per workspace or set an explicit
 //     harness conversation id). `--conversation` adoption only when a harness
 //     session id is known.
-//   dsh: one-shot `headless`; the session goal is the task (Resume re-runs
-//     it). --session-id adoption only when a harness session id is known.
 function ptyArgsFor(sess, h) {
-  if (sess.harness === "dsh") {
-    return h.args(sess.harnessSessionId || null, (sess.title || "").trim() || null);
-  }
   if (sess.harnessSessionId) return h.args(sess.harnessSessionId);
   if (sess.everRan && sess.harness === "droid") return ["resume", "--last"];
   if (sess.everRan && sess.harness === "agy") return [...h.args(null), "--continue"];
@@ -1053,14 +1278,14 @@ function webActivityFromSnapshot(snap, now = Date.now()) {
 }
 
 // Single-session poll against its own backend. Returns {activity, idleMs} or
-// null when skipped (non-opencode / unbound / not running) or the backend
+// null when skipped (non-web / unbound / not running) or the backend
 // is unreachable (fail-open: caller keeps "running", never false attention).
 // activeData (the /api/session/active payload for this backend) may be
 // injected by the batched sync below so N sessions on the shared backend
 // cost one /active fetch instead of N. Exported for tests.
 async function getWebActivity(id, timeoutMs, activeData) {
   const sess = sessionById(id);
-  if (!sess || sess.harness !== "opencode" || sess.mode !== "web") return null;
+  if (!sess || (sess.harness !== "opencode" && sess.harness !== "chassis") || sess.mode !== "web") return null;
   if (sess.status !== "running" || !sess.port || !sess.harnessSessionId) return null;
   const to = timeoutMs || 1500;
   const hid = sess.harnessSessionId;
@@ -1129,7 +1354,7 @@ async function syncAllWebActivity(timeoutMs) {
   const to = timeoutMs || 1500;
   const targets = store.getSessions().filter(
     (s) =>
-      s && s.harness === "opencode" && s.mode === "web" &&
+      s && (s.harness === "opencode" || s.harness === "chassis") && s.mode === "web" &&
       s.status === "running" && s.port && s.harnessSessionId
   );
   const live = new Set(targets.map((s) => s.id));
@@ -1162,8 +1387,8 @@ async function syncAllWebActivity(timeoutMs) {
       }
     }
     if (!activeOk) return;
-    const out = await Promise.allSettled(ss.map((s) => getWebActivity(s.id, to, activeData)));
-    out.forEach((r, i) => {
+    const settled = await Promise.allSettled(ss.map((s) => getWebActivity(s.id, to, activeData)));
+    settled.forEach((r, i) => {
       if (r.status !== "fulfilled" || !r.value) return;
       _webActivity.set(ss[i].id, { ...r.value, at: Date.now() });
       map.set(ss[i].id, r.value);
@@ -1218,7 +1443,10 @@ async function _ensureInner(id) {
         await migrateToShared(id);
         cur = sessionById(id);
       }
-      if (cur && cur.harness === "opencode" && !cur.harnessSessionId) {
+      if (cur && cur.harness === "opencode") {
+        // Unconditional verify: a stored hid may dangle (backend DB wiped /
+        // replaced) — ensureHarnessSession GET-verifies and recreates on 404.
+        // Skipping when a hid exists strands the iframe on ?session=<gone>.
         try {
           await ensureHarnessSession(id);
         } catch (e) {
@@ -1227,6 +1455,34 @@ async function _ensureInner(id) {
         cur = sessionById(id);
       }
       store.updateSession(id, { status: "running", error: null, backendPid: _sharedPid || (cur && cur.backendPid) });
+      markAlive(id);
+      return sessionById(id);
+    }
+    if (isSharedChassis(sess)) {
+      // ponytail: liveness cache first — same store record, zero I/O.
+      if (sess.status === "running" && sess.harnessSessionId && isRecentlyAlive(id)) {
+        return sessionById(id);
+      }
+      const ws = workspaceById(sess.workspaceId);
+      if (!ws) throw new Error(`workspace gone for session ${id}`);
+      await ensureSharedChassis(ws.path);
+      let cur = sessionById(id);
+      if (cur && cur.port !== chassisPort()) {
+        store.updateSession(id, { port: chassisPort(), backendPid: _sharedChassisPid || null });
+        cur = sessionById(id);
+      }
+      if (cur && cur.harness === "chassis") {
+        // Unconditional verify like opencode above: a stored hid may dangle
+        // (backend store wiped) — ensureHarnessSession GET-verifies and
+        // recreates on 404.
+        try {
+          await ensureHarnessSession(id);
+        } catch (e) {
+          process.stderr.write(`[${id}] chassis session backfill failed: ${e.message}\n`);
+        }
+        cur = sessionById(id);
+      }
+      store.updateSession(id, { status: "running", error: null, backendPid: _sharedChassisPid || (cur && cur.backendPid) });
       markAlive(id);
       return sessionById(id);
     }
@@ -1270,7 +1526,7 @@ async function _ensureInner(id) {
 
 function killSessionProc(id) {
   const sess0 = sessionById(id);
-  if (sess0 && isSharedOpencode(sess0)) return; // shared process outlives any one session
+  if (sess0 && (isSharedOpencode(sess0) || isSharedChassis(sess0))) return; // shared processes outlive any one session
   const proc = _procs.get(id);
   if (proc) {
     _procs.delete(id);
@@ -1300,7 +1556,7 @@ function killSessionProc(id) {
 }
 
 // Live web-backend child count (prunes reaped entries). Used by shutdown to
-// wait out graceful exits so restarts don't orphan slow backends (dsh/node
+// wait out graceful exits so restarts don't orphan slow backends (node
 // was observed surviving SIGTERM past process.exit).
 function webProcCount() {
   for (const [id, proc] of [..._procs.entries()]) {
@@ -1316,8 +1572,8 @@ function webProcCount() {
 
 function killSession(id) {
   const sess = sessionById(id);
-  if (sess && isSharedOpencode(sess)) {
-    // Chat lives in the shared backend's global DB: best-effort DELETE so
+  if (sess && (isSharedOpencode(sess) || isSharedChassis(sess))) {
+    // Chat lives in the shared backend's global store: best-effort DELETE so
     // dead chats don't pile up. The shared process itself stays for the
     // remaining sessions — never killed here.
     const port = sess.port;
@@ -1359,7 +1615,7 @@ function renameSession(id, title) {
 // Reboot existing definitions on server start (best-effort, sequential).
 async function restoreAll() {
   const all = store.getSessions();
-  // Boot the shared backend once up front so opencode restores backfill
+  // Boot the shared backends once up front so restores backfill
   // chats instead of each paying adopt/spawn latency in series.
   const op = all.find((s) => isSharedOpencode(s));
   if (op) {
@@ -1368,6 +1624,15 @@ async function restoreAll() {
       await ensureSharedBackend(ws && ws.path);
     } catch (e) {
       process.stderr.write(`[shared] boot restore failed: ${e && e.message}\n`);
+    }
+  }
+  const cha = all.find((s) => isSharedChassis(s));
+  if (cha) {
+    const ws = workspaceById(cha.workspaceId);
+    try {
+      await ensureSharedChassis(ws && ws.path);
+    } catch (e) {
+      process.stderr.write(`[shared-chassis] boot restore failed: ${e && e.message}\n`);
     }
   }
   for (const s of all) {
@@ -1444,18 +1709,24 @@ module.exports = {
   syncAllWebActivity,
   tryAdoptBackend,
   probePortOnce,
-  ensureHarnessSession,  syncSessionTitle,
+  ensureHarnessSession, repairBareHarnessSession, syncSessionTitle,
   syncAllSessionTitles,
   pushTitleToHarness,
+  tryAdoptChassis,
   prewarmSessionConfig,
   renameSession,
   RENAME_TITLE_MAX,
   webProcCount,
   sharedPort,
   isSharedOpencode,
+  isOpencodeFamily,
   ensureSharedBackend,
   migrateToShared,
   _resetSharedForTest,
+  chassisPort,
+  isSharedChassis,
+  ensureSharedChassis,
+  _resetSharedChassisForTest,
   WORKING_WINDOW_MS,
   PICKUP_GRACE_MS,
   ALIVE_TTL_MS,

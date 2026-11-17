@@ -35,8 +35,7 @@ construction. Only `src/server/*` (loaded once at boot) needs one:
   `ps -eo pid,args | grep '[o]pencode serve'` pre-restart and confirm the
   same PIDs post-restart (respawned PIDs = interrupted turns, investigate).
   PTY sessions are still reaped by `shutdownAll()` by design. Then verify
-  health + `/api/state` statuses (opencode sessions `running`; dsh
-  auth-wall states pre-existing).
+  health + `/api/state` statuses (opencode + chassis sessions `running`).
 
 Do not ask before deploying — deploy + verify, then report. Restarting from
 a shell inside a manager session is safe (only the main process is
@@ -44,6 +43,12 @@ signaled, not your shell).
 Non-login shells have no user bus: prefix every `systemctl --user` with
 `export XDG_RUNTIME_DIR=/run/user/$(id -u)` (else `Failed to connect to
 bus: No medium found`).
+- UI changes need a version bump: `app.js`/`app.css` are served immutable
+  (`?v=VERSION`, 1y) and the running VERSION comes from `package.json`.
+  Any frontend change must bump the version (patch is fine) or stale tabs
+  keep the old bundle: same `?v=` pin + new `index.html` = new buttons
+  wired to old JS that silently rejects them (learned 2026-11-06: chassis
+  unselectable until 0.2.4 → 0.2.5).
 
 ## E2E (embedded web UI)
 
@@ -93,6 +98,11 @@ pane 1 explicitly first — a fresh page boots with empty panes.
   before launching: embedded in the same `bash -c` as the run, the wrapper
   cmdline contains the literal script name and pgrep self-matches (false
   ABORT, learned 2026-10-13).
+- Always redirect e2e output to a file (`bash scripts/e2e-web-defaults.sh >
+  /tmp/opencode/e2e-*.log 2>&1`), never pipe through `tail`: the script only
+  counts failures (`FAILS=$((FAILS+1))`, no name summary), so a truncated
+  pipe permanently loses which tests failed (learned 2026-11-06: 7 of 10
+  FAIL lines lost to `| tail -60`, full re-run needed).
 - Standing-ops gate lock (learned 2026-10-27): a periodic CI gate runs this
   same script (`flock /tmp/standing-ops-e2e.lock`, ports 4003/4460). Check
   the lock is free before launching (`flock -n /tmp/standing-ops-e2e.lock

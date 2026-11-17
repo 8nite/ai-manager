@@ -186,3 +186,75 @@ test("split: rapid re-activate of the same session does not double-switch", () =
   assert.ok(guard.includes("focusPane(pane.pid)"), "duplicate switch must keep pane focus");
   assert.ok(guard.includes("return"), "duplicate switch must not start backend work");
 });
+
+test("split: closing a session falls back to another session cross-workspace (no blank re-init)", () => {
+  // Deleting the visible session must not park the pane on empty (which
+  // destroys the live opencode SPA and forces a full re-init on the next
+  // switch). It must pick another session — same workspace first, then any
+  // other workspace — and warm-switch the live frame via client nav.
+  assert.ok(js.includes("function pickFallbackSession("), "fallback picker missing");
+  const pk = js.slice(js.indexOf("function pickFallbackSession("), js.indexOf("function pickFallbackSession(") + 2500);
+  assert.ok(pk.includes("preferWorkspaceId") || pk.includes("preferWs"), "picker must prefer the same workspace");
+  assert.ok(pk.includes("remaining[0]") || pk.includes("remaining.find"), "picker must fall through to any workspace");
+  // Sidebar minus path must warm-switch before purging.
+  const minus = js.slice(js.indexOf("const delSessBtn"), js.indexOf("const delSessBtn") + 3000);
+  assert.ok(minus.includes("pickFallbackSession"), "session delete must pick a fallback");
+  assert.ok(minus.includes("setPaneSession(p, fb)"), "session delete must switch to the fallback");
+  assert.ok(minus.indexOf("setPaneSession(p, fb)") < minus.indexOf("purgeSessionFrames(id)"), "warm switch must precede the purge so the live frame is retargeted, not destroyed");
+  // Workspace delete path: same cross-workspace fallback.
+  const wsdel = js.slice(js.indexOf("const delBtn = head.querySelector"), js.indexOf("const delBtn = head.querySelector") + 3500);
+  assert.ok(wsdel.includes("pickFallbackSession"), "workspace delete must pick a fallback");
+  assert.ok(wsdel.includes("setPaneSession(p, fb)"), "workspace delete must switch to the fallback");
+});
+
+test("split: background prune keeps a live view instead of blanking (refresh + boot)", () => {
+  // Sessions deleted elsewhere (API, another client, stale persisted pane)
+  // surface in the 8s refresh prune and at boot. Both must fall back to a
+  // live session instead of nulling the pane to empty.
+  const rf = js.slice(js.indexOf("// Prune panes whose session vanished"), js.indexOf("// Prune panes whose session vanished") + 2500);
+  assert.ok(rf.includes("pickFallbackSession"), "refresh prune must fall back to another session");
+  assert.ok(rf.includes("sparedPanes"), "refresh purge must spare the reused live frame");
+  const boot = js.slice(js.indexOf("// Re-attach surviving pane sessions"), js.indexOf("// Re-attach surviving pane sessions") + 1500);
+  assert.ok(boot.includes("pickFallbackSession"), "boot prune must fall back instead of blanking");
+});
+
+test("split: fallback picker prefers same workspace, then any, then null", () => {
+  // Functional check of the picker ordering (same-workspace first for
+  // context, cross-workspace next so the pane never blanks, null when empty).
+  const start = js.indexOf("function pickFallbackSession(");
+  assert.ok(start !== -1, "picker missing");
+  const end = js.indexOf("\n}", start);
+  const src = js.slice(start, end + 2);
+  const vm = require("node:vm");
+  const sandbox = {
+    state: { sessions: [], panes: [] },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(src + "\nthis.__pick = pickFallbackSession;", sandbox);
+  const pick = vm.runInContext(
+    `(() => {
+      const run = (sessions, panes, excluded, prefer) => {
+        state.sessions = sessions; state.panes = panes;
+        const ex = excluded ? new Set(excluded) : new Set();
+        return __pick(ex, prefer);
+      };
+      const out = [];
+      out.push(run(
+        [{id:"a",workspaceId:"w1"},{id:"b",workspaceId:"w1"},{id:"c",workspaceId:"w2"}],
+        [{sessionId:"a"}], ["a"], "w1"));
+      out.push(run(
+        [{id:"a",workspaceId:"w1"},{id:"c",workspaceId:"w2"}],
+        [{sessionId:"a"}], ["a"], "w1"));
+      out.push(run([{id:"a",workspaceId:"w1"}], [{sessionId:"x"}], ["a"], "w1"));
+      out.push(run(
+        [{id:"a",workspaceId:"w1"},{id:"b",workspaceId:"w1"}],
+        [{sessionId:"b"}], [], "w1"));
+      return out;
+    })()`,
+    sandbox
+  );
+  assert.equal(pick[0], "b", "same-workspace unshown first");
+  assert.equal(pick[1], "c", "cross-workspace when same workspace empty");
+  assert.equal(pick[2], null, "null when nothing remains");
+  assert.equal(pick[3], "a", "unshown session wins over the shown one");
+});

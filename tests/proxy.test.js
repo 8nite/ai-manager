@@ -300,108 +300,17 @@ test("proxy: explicitMiddleware shims pre-created chat id into session root", as
   srv.close();
 });
 
-test("proxy: withToken appends dsh token upstream only when absent", () => {
-  const { withToken } = proxy;
-  assert.equal(withToken("/a?b=1", "TOK12345"), "/a?b=1&token=TOK12345");
-  assert.equal(withToken("/", "TOK12345"), "/?token=TOK12345");
-  assert.equal(withToken("/?token=OTHER", "TOK12345"), "/?token=OTHER");
-  assert.equal(withToken("/api/x", null), "/api/x");
-  assert.equal(withToken("/api/x", ""), "/api/x");
-});
-
-test("proxy: proxyRequest forwards harnessToken query upstream", async () => {
-  const srv = await new Promise((resolve) => {
-    const s = http.createServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ url: req.url }));
-    });
-    s.listen(0, "127.0.0.1", () => resolve(s));
-  });
-  const port = srv.address().port;
-  const get = (url, opts) => new Promise((resolve) => {
-    const req = mockReq({ method: "GET", url });
-    const res = mockRes();
-    res.on("done", (raw) => resolve({ status: res.status, body: raw }));
-    proxy.proxyRequest(req, res, { host: "127.0.0.1", port }, "/page", opts);
-  });
-  const withTok = await get("/s/x/", { harnessToken: "TOK12345" });
-  assert.equal(withTok.status, 200);
-  assert.equal(JSON.parse(withTok.body).url, "/page?token=TOK12345");
-  const plain = await get("/s/x/", {});
-  assert.equal(JSON.parse(plain.body).url, "/page");
-  srv.close();
-});
-
-test("proxy: harnessToken skipped once backend cookie exists (dsh handshake)", async () => {
-  const { hasBackendCookie } = proxy;
-  assert.equal(hasBackendCookie({}), false);
-  assert.equal(hasBackendCookie({ cookie: "aimgr_active=sess_1" }), false);
-  assert.equal(hasBackendCookie({ cookie: "oc_locale=en; aimgr_active=sess_1" }), false);
-  assert.equal(hasBackendCookie({ cookie: "aimgr_active=sess_1; dsh-auth-x=abc" }), true);
-  const srv = await new Promise((resolve) => {
-    const s = http.createServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ url: req.url }));
-    });
-    s.listen(0, "127.0.0.1", () => resolve(s));
-  });
-  const port = srv.address().port;
-  const get = (headers, opts) => new Promise((resolve) => {
-    const req = mockReq({ method: "GET", url: "/s/x/", headers });
-    const res = mockRes();
-    res.on("done", (raw) => resolve(JSON.parse(raw).url));
-    proxy.proxyRequest(req, res, { host: "127.0.0.1", port }, "/page", opts);
-  });
-  assert.equal(await get({ cookie: "dsh-auth-x=abc" }, { harnessToken: "TOK" }), "/page");
-  assert.equal(await get({}, { harnessToken: "TOK" }), "/page?token=TOK");
-  srv.close();
-});
-
 test("proxy: backend cookies pass through, aimgr_active stripped", async () => {
   const { stripAimgrCookie } = proxy;
-  const h = { "set-cookie": ["aimgr_active=evil; Path=/", "dsh_sess=abc; Path=/; HttpOnly"] };
+  const h = { "set-cookie": ["aimgr_active=evil; Path=/", "chassis_sess=abc; Path=/; HttpOnly"] };
   stripAimgrCookie(h);
-  assert.deepEqual(h["set-cookie"], ["dsh_sess=abc; Path=/; HttpOnly"]);
+  assert.deepEqual(h["set-cookie"], ["chassis_sess=abc; Path=/; HttpOnly"]);
   const h2 = { "set-cookie": "aimgr_active=evil; Path=/" };
   stripAimgrCookie(h2);
   assert.ok(!("set-cookie" in h2));
   const h3 = {};
   stripAimgrCookie(h3); // no-op
   assert.deepEqual(h3, {});
-});
-
-test("proxy: dsh session root redirects once to ?token= for app boot", async () => {
-  const os = require("os");
-  const path = require("path");
-  const store = require("../src/server/store");
-  store._resetForTest(path.join(os.tmpdir(), `aimgr-proxy-dsh-${Date.now()}.json`));
-  const ws = store.addWorkspace({ id: "ws_1", path: "/tmp", name: "tmp", createdAt: 1 });
-  store.addSession({
-    id: "sess_dsh", workspaceId: ws.id, harness: "dsh", title: "t",
-    mode: "web", port: 9, status: "running", harnessToken: "TOKFORBOOT",
-    createdAt: 1, lastActiveAt: 1,
-  });
-  // No backend cookie, no token in query → 302 to ?token= (no backend hit).
-  const res1 = mockRes();
-  let wroteHead = null;
-  res1.writeHead = (s, h) => { wroteHead = { s, h }; res1.headersSent = true; };
-  const origEnd = res1.end;
-  const done1 = new Promise((r) => res1.on("done", r));
-  res1.end = (c) => { if (c) res1.chunks.push(Buffer.from(c)); res1.emit("done", ""); };
-  proxy.explicitMiddleware(mockReq({ method: "GET", url: "/s/sess_dsh/" }), res1, () => { throw new Error("must not fall through"); });
-  await done1;
-  assert.equal(wroteHead.s, 302);
-  assert.ok(String(wroteHead.h.Location).includes("token=TOKFORBOOT"), wroteHead.h.Location);
-  assert.ok(String(res1.headers["set-cookie"]).includes("aimgr_active=sess_dsh"));
-  // With backend cookie present → no redirect (falls to proxy; port 9 refuses).
-  const res2 = mockRes();
-  const done2 = new Promise((r) => res2.on("done", r));
-  proxy.explicitMiddleware(
-    mockReq({ method: "GET", url: "/s/sess_dsh/", headers: { cookie: "dsh-auth-x=abc" } }),
-    res2, () => { throw new Error("must not fall through"); }
-  );
-  const raw2 = await done2;
-  assert.ok(String(raw2).includes("unreachable"), "proxied, not redirected");
 });
 
 test("proxy: withQueueDefault unit (fail-open)", () => {
@@ -891,5 +800,154 @@ test("proxy: apiScope XHR.open preserves call arity (async default, upload fix)"
     g.XMLHttpRequest = saved.XMLHttpRequest;
     g.EventSource = saved.EventSource;
     g.WebSocket = saved.WebSocket;
+  }
+});
+
+test("proxy: webDefaultsSeedFor picks the chassis namespace for chassis shells", () => {
+  const { webDefaultsSeedFor, WEB_DEFAULTS_SEED_BODY, CHASSIS_DEFAULTS_SEED_BODY } = proxy;
+  assert.equal(webDefaultsSeedFor("opencode"), WEB_DEFAULTS_SEED_BODY);
+  assert.equal(webDefaultsSeedFor("chassis"), CHASSIS_DEFAULTS_SEED_BODY);
+  assert.ok(CHASSIS_DEFAULTS_SEED_BODY.includes("chassis.global.dat:settings.v3"), "chassis settings key");
+  assert.ok(CHASSIS_DEFAULTS_SEED_BODY.includes("chassis-color-scheme"), "chassis color-scheme key");
+  assert.ok(CHASSIS_DEFAULTS_SEED_BODY.includes("aimgr-web-defaults"), "same marker so CSP hashes stay valid");
+  assert.ok(WEB_DEFAULTS_SEED_BODY.includes("opencode.global.dat:settings.v3"), "opencode settings key");
+});
+
+test("proxy: injectWebDefaults seeds per-harness keys without overriding", () => {
+  const { injectWebDefaults } = proxy;
+  const op = injectWebDefaults("<html><head></head><body></body></html>", "opencode");
+  assert.ok(op.includes("opencode-color-scheme"), "opencode seed injected");
+  assert.ok(!op.includes("chassis-color-scheme"), "no chassis seed in opencode shell");
+  const cha = injectWebDefaults("<html><head></head><body></body></html>", "chassis");
+  assert.ok(cha.includes("chassis-color-scheme"), "chassis seed injected");
+  assert.ok(!cha.includes("opencode-color-scheme"), "no opencode seed in chassis shell");
+  assert.equal(injectWebDefaults(cha, "chassis"), cha, "idempotent");
+});
+
+test("proxy: shimCspHeaders falls back to default-src when no script-src", () => {
+  const { shimCspHeaders, apiScopeBodyFor, hashForBody } = proxy;
+  const body = apiScopeBodyFor("sess_lum2");
+  const h = { "content-security-policy": "default-src 'self'; connect-src 'self' ws:;" };
+  shimCspHeaders(h, body);
+  assert.ok(h["content-security-policy"].includes(`'sha256-${hashForBody(body)}'`), "hash added");
+  assert.ok(h["content-security-policy"].includes("default-src 'self' 'sha256-"), "lands in default-src");
+  const before = h["content-security-policy"];
+  shimCspHeaders(h, body); // idempotent
+  assert.equal(h["content-security-policy"], before);
+});
+
+test("proxy: vite hashed bundles get immutable caching", () => {
+  const { isImmutableAsset } = proxy;
+  assert.equal(isImmutableAsset("/assets/index-B3k8qrHn.js", "GET"), true);
+  assert.equal(isImmutableAsset("/assets/index-Cbi9hX45.css", "GET"), true);
+  assert.equal(isImmutableAsset("/assets/index.js", "GET"), false, "unhashed name not cached");
+  assert.equal(isImmutableAsset("/assets/index-B3k8qrHn.js", "POST"), false);
+  assert.equal(isImmutableAsset("/assets/sub/index-B3k8qrHn.js", "GET"), false, "nested path not cached");
+  assert.equal(isImmutableAsset("/_assets/index-xL8X34y1.js", "GET"), true, "opencode-family bundles still cached");
+});
+
+test("proxy: explicitMiddleware serves chassis roots with shim + chassis defaults + scope", async () => {
+  const os = require("os");
+  const path = require("path");
+  const store = require("../src/server/store");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-proxy-chassis-${Date.now()}.json`));
+  const html = '<!doctype html><html><head></head><body><div id="root"></div></body></html>';
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'",
+      });
+      res.end(html);
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = store.addWorkspace({ id: "ws_1", path: "/tmp", name: "tmp", createdAt: 1 });
+    store.addSession({
+      id: "sess_cha", workspaceId: ws.id, harness: "chassis", title: "t",
+      mode: "web", port, status: "running", harnessSessionId: "abc12345",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    const res1 = mockRes();
+    const done1 = new Promise((r) => res1.on("done", r));
+    proxy.explicitMiddleware(
+      mockReq({ method: "GET", url: "/s/sess_cha/" }), res1,
+      () => { throw new Error("should not fall through"); }
+    );
+    const raw1 = await done1;
+    assert.equal(res1.status, 200);
+    assert.ok(raw1.includes("aimgr-api-scope"), "api scope injected");
+    assert.ok(raw1.includes("/s/sess_cha"), "scope carries manager session id");
+    assert.ok(raw1.includes("aimgr-route-shim"), "chassis shell gets the route shim");
+    assert.ok(raw1.includes("chassis-color-scheme"), "chassis defaults seed injected");
+    assert.ok(!raw1.includes("opencode-color-scheme"), "no opencode seed in chassis shell");
+    const csp = String(res1.head["content-security-policy"]);
+    assert.ok(csp.includes("sha256-"), "header CSP allows the injected scripts");
+  } finally {
+    srv.close();
+  }
+});
+
+test("proxy: scope-only injection applies without shimRoute (sub-resource lane)", async () => {
+  const html = '<!doctype html><html><head><title>t</title></head><body></body></html>';
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'",
+      });
+      res.end(html);
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const req = mockReq({ method: "GET", url: "/s/sess_scope9/" });
+    const res = mockRes();
+    const done = new Promise((r) => res.on("done", r));
+    proxy.proxyRequest(req, res, { host: "127.0.0.1", port }, "/", { scopeSessionId: "sess_scope9" });
+    const raw = await done;
+    assert.equal(res.status, 200);
+    assert.ok(raw.includes("aimgr-api-scope"), "scope injected without shimRoute");
+    assert.ok(!raw.includes("aimgr-route-shim"), "no route shim without shimRoute");
+  } finally {
+    srv.close();
+  }
+});
+
+test("proxy: SSE streams through scoped inject path without buffering", async () => {
+  // Regression (2026-10-31): /s/:id/api/event hung forever — the scoped
+  // inject path buffered the whole upstream body and only replied on
+  // upstream end, which an infinite SSE never sends.
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+      res.write(": connected\n\n");
+      // Never end: the client must see headers + first chunk anyway.
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const req = mockReq({ method: "GET", url: "/s/sess_sse1/api/event" });
+    const res = mockRes();
+    proxy.proxyRequest(req, res, { host: "127.0.0.1", port }, "/api/event", { scopeSessionId: "sess_sse1" });
+    const first = await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("SSE first chunk never arrived (buffered forever?)")), 3000);
+      const check = () => {
+        if (res.headersSent && res.chunks.length) { clearTimeout(t); resolve(Buffer.concat(res.chunks).toString("utf8")); }
+        else setTimeout(check, 25);
+      };
+      check();
+    });
+    assert.equal(res.status, 200);
+    assert.ok(first.includes("connected"), "first SSE chunk streamed, got: " + first.slice(0, 80));
+  } finally {
+    // Tear down the never-ending SSE sockets first: srv.close() alone waits
+    // for open connections and would hang the runner.
+    try { srv.closeAllConnections(); } catch {}
+    srv.close();
   }
 });

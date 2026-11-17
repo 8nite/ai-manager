@@ -25,22 +25,6 @@ test("ptyArgsFor: explicit harness session id wins", () => {
   );
 });
 
-test("ptyArgsFor: dsh passes goal title as headless task", () => {
-  const h = getHarness("dsh");
-  assert.deepEqual(
-    sessions.ptyArgsFor({ harness: "dsh", title: "run the tests" }, h),
-    ["-y", "@deepseek-ai/dsh", "headless", "run the tests"]
-  );
-});
-
-test("ptyArgsFor: dsh without goal spawns bare headless (usage error, no crash)", () => {
-  const h = getHarness("dsh");
-  assert.deepEqual(
-    sessions.ptyArgsFor({ harness: "dsh", title: "  " }, h),
-    ["-y", "@deepseek-ai/dsh", "headless"]
-  );
-});
-
 test("ptyArgsFor: first agy run is plain interactive with default model", () => {
   const h = getHarness("agy");
   assert.deepEqual(

@@ -47,7 +47,7 @@ test("sessions: ensureHarnessSession pre-creates + verifies opencode chat", asyn
           res.end(JSON.stringify({ data: { id: "ses_precreated999" } }));
         } else if (req.method === "GET" && req.url === "/api/session/ses_precreated999") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ data: { id: "ses_precreated999" } }));
+          res.end(JSON.stringify({ data: { id: "ses_precreated999", agent: "build", model: { id: "m", providerID: "p" } } }));
         } else if (req.url === "/api/session/ses_gone") {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end("{}");
@@ -540,7 +540,7 @@ test("sessions: killSessionProc stops the recorded backend pid", async () => {
   store.addSession({
     // Non-opencode harness: opencode records route to the shared backend,
     // whose process outlives any one session (see the shared-kill test).
-    id: "sess_adoptkill", workspaceId: ws.id, harness: "dsh", title: "t",
+    id: "sess_adoptkill", workspaceId: ws.id, harness: "droid", title: "t",
     mode: "pty", port: deadPort, status: "running", harnessSessionId: "ses_x",
     backendPid: sleeper.pid, createdAt: 1, lastActiveAt: 1,
   });
@@ -1082,6 +1082,592 @@ test("sessions: prewarmSessionConfig fills the proxy config cache over loopback"
     assert.equal(await sessions.prewarmSessionConfig("sess_pwpty"), false);
   } finally {
     proxy._clearConfigCacheForTest();
+    srv.close();
+  }
+});
+
+test("sessions: chassisPort defaults to HARNESS_BASE-11, honors override", () => {
+  const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+  const prevBase = process.env.AI_MGR_HARNESS_BASE_PORT;
+  try {
+    delete process.env.AI_MGR_CHASSIS_PORT;
+    delete process.env.AI_MGR_HARNESS_BASE_PORT;
+    assert.equal(sessions.chassisPort(), 4089);
+    process.env.AI_MGR_HARNESS_BASE_PORT = "4450";
+    assert.equal(sessions.chassisPort(), 4439);
+    process.env.AI_MGR_CHASSIS_PORT = "4998";
+    assert.equal(sessions.chassisPort(), 4998);
+  } finally {
+    if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+    else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+    if (prevBase === undefined) delete process.env.AI_MGR_HARNESS_BASE_PORT;
+    else process.env.AI_MGR_HARNESS_BASE_PORT = prevBase;
+  }
+});
+
+test("sessions: tryAdoptChassis probes the daemon info endpoint", async () => {
+  const http = require("http");
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ pid: 424242 }));
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    assert.equal(await sessions.tryAdoptChassis(srv.address().port, 1000), true);
+  } finally {
+    srv.close();
+  }
+  const tmp = await new Promise((resolve) => {
+    const s = http.createServer(() => {});
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const deadPort = tmp.address().port;
+  await new Promise((r) => tmp.close(r));
+  assert.equal(await sessions.tryAdoptChassis(deadPort, 500), false);
+});
+
+test("sessions: ensureHarnessSession pre-creates + verifies chassis chat", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chassis-${Date.now()}.json`));
+  sessions._resetSharedChassisForTest();
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url} ${body}`);
+        if (req.method === "POST" && req.url === "/api/session") {
+          const p = JSON.parse(body);
+          assert.equal(p.location.directory, os.tmpdir());
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: { id: "chahid99" } }));
+        } else if (req.method === "GET" && req.url === "/api/session/chahid99") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: { id: "chahid99", title: "t", agent: "build", model: { id: "m" } } }));
+        } else if (req.url === "/api/session/chagone") {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end("{}");
+        } else {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end("{}");
+        }
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+    process.env.AI_MGR_CHASSIS_PORT = String(port);
+    try {
+      const ws = sessions.createWorkspace(os.tmpdir());
+      store.addSession({
+        id: "sess_cha1", workspaceId: ws.id, harness: "chassis", title: "t",
+        mode: "web", port, status: "running", harnessSessionId: null,
+        createdAt: 1, lastActiveAt: 1,
+      });
+      const hid = await sessions.ensureHarnessSession("sess_cha1");
+      assert.equal(hid, "chahid99");
+      assert.equal(sessions.sessionById("sess_cha1").harnessSessionId, "chahid99");
+      // Second call verifies via GET, no re-create.
+      const n = seen.length;
+      assert.equal(await sessions.ensureHarnessSession("sess_cha1"), "chahid99");
+      assert.ok(seen.slice(n).some((l) => l.startsWith("GET /api/session/chahid99")));
+      assert.ok(!seen.slice(n).some((l) => l.startsWith("POST /api/session ")), "no recreate on verify");
+      // Dangling id → 404 → recreated.
+      store.updateSession("sess_cha1", { harnessSessionId: "chagone" });
+      assert.equal(await sessions.ensureHarnessSession("sess_cha1"), "chahid99");
+    } finally {
+      if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+      else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+      sessions._resetSharedChassisForTest();
+    }
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: chassis creates share one daemon port with zero child spawn", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chashare-${Date.now()}.json`));
+  sessions._resetSharedChassisForTest();
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (req.url === "/api/info") res.end(JSON.stringify({ pid: 424242 }));
+        else if (req.method === "POST" && req.url === "/api/session") res.end(JSON.stringify({ data: { id: `ses_cha${seen.length}` } }));
+        else res.end(JSON.stringify({ data: { id: "x", agent: "build", model: { id: "m" } } }));
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+  process.env.AI_MGR_CHASSIS_PORT = String(srv.address().port);
+  try {
+    const ws = sessions.createWorkspace(os.tmpdir());
+    const a = await sessions.createSession(ws.id, "chassis", "first");
+    const b = await sessions.createSession(ws.id, "chassis", "second");
+    assert.equal(a.port, srv.address().port);
+    assert.equal(b.port, srv.address().port);
+    assert.equal(a.mode, "web");
+    assert.equal(a.status, "running");
+    assert.equal(b.status, "running");
+    assert.ok(a.harnessSessionId && b.harnessSessionId, "chats pre-created");
+    assert.notEqual(a.harnessSessionId, b.harnessSessionId, "distinct chats");
+    assert.equal(sessions.webProcCount(), 0, "shared adopt must not spawn children");
+  } finally {
+    if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+    else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+    sessions._resetSharedChassisForTest();
+    srv.close();
+  }
+});
+
+test("sessions: syncSessionTitle adopts the chassis backend title", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chasync-${Date.now()}.json`));
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { id: "chahid1", title: "  chassis auto title\t" } }));
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chasync1", workspaceId: ws.id, harness: "chassis", title: "chassis · tmp",
+      mode: "web", port, status: "running", harnessSessionId: "chahid1",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    const updated = await sessions.syncSessionTitle("sess_chasync1");
+    assert.equal(updated.title, "chassis auto title");
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: syncSessionTitle derives chassis default from first user message", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chasyncdef-${Date.now()}.json`));
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      if (req.url.includes("/message")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "m1", type: "user", text: "first chassis prompt", time: { created: 1000 } }] }));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: { id: "chahid2", title: "" } }));
+      }
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chasync2", workspaceId: ws.id, harness: "chassis", title: "chassis · tmp",
+      mode: "web", port, status: "running", harnessSessionId: "chahid2",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal((await sessions.syncSessionTitle("sess_chasync2")).title, "first chassis prompt");
+    assert.ok(seen.some((l) => l.includes("/message")), `message derivation fetch expected: ${seen}`);
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: syncSessionTitle keeps the chassis default when no user messages exist", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chasyncempty-${Date.now()}.json`));
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      if (req.url.includes("/message")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: [] }));
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ data: { id: "chahid9", title: "" } }));
+      }
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chasync9", workspaceId: ws.id, harness: "chassis", title: "chassis · tmp",
+      mode: "web", port, status: "running", harnessSessionId: "chahid9",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal((await sessions.syncSessionTitle("sess_chasync9")).title, "chassis · tmp");
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: pushTitleToHarness PATCHes the chassis chat path", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chapush-${Date.now()}.json`));
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url} ${body}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chapush1", workspaceId: ws.id, harness: "chassis", title: "user rename",
+      mode: "web", port, status: "running", harnessSessionId: "chahid3",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal(await sessions.pushTitleToHarness("sess_chapush1"), true);
+    assert.ok(seen.some((l) => l.startsWith("PATCH /api/session/chahid3")), `no chassis PATCH seen: ${seen}`);
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: killSession on a shared chassis session drops the chat, never the daemon", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chakill-${Date.now()}.json`));
+  sessions._resetSharedChassisForTest();
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+  process.env.AI_MGR_CHASSIS_PORT = String(srv.address().port);
+  try {
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chak1", workspaceId: ws.id, harness: "chassis", title: "t",
+      mode: "web", port: srv.address().port, status: "running", harnessSessionId: "chahidk",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    sessions.killSession("sess_chak1");
+    assert.equal(sessions.sessionById("sess_chak1"), undefined, "record removed");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(seen.some((l) => l === "DELETE /api/session/chahidk"), `chassis chat DELETE expected: ${seen}`);
+  } finally {
+    if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+    else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+    sessions._resetSharedChassisForTest();
+    srv.close();
+  }
+});
+
+test("sessions: repairBareHarnessSession fills missing agent+model with backend shapes", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-repair-${Date.now()}.json`));
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url} ${body}`);
+        const j = (o) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
+        if (req.method === "GET" && req.url.startsWith("/api/session/ses_bare1")) return j({ data: { id: "ses_bare1" } });
+        if (req.method === "GET" && req.url.startsWith("/api/model/default")) return j({ data: { id: "mX", modelID: "mX", providerID: "provX" } });
+        if (req.method === "GET" && req.url === "/api/agent") return j({ data: [{ id: "plan" }, { id: "build" }] });
+        if (req.method === "POST" && req.url === "/api/session/ses_bare1/agent") return j({});
+        if (req.method === "POST" && req.url === "/api/session/ses_bare1/model") return j({});
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_repair1", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port, status: "running", harnessSessionId: "ses_bare1",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal(await sessions.repairBareHarnessSession("sess_repair1", null), true);
+    const posts = seen.filter((l) => l.startsWith("POST"));
+    assert.ok(posts.some((l) => l === `POST /api/session/ses_bare1/agent {"agent":"build"}`), `agent shape wrong: ${posts}`);
+    assert.ok(posts.some((l) => l === `POST /api/session/ses_bare1/model {"model":{"id":"mX","providerID":"provX"}}`), `model shape wrong: ${posts}`);
+    // ensureHarnessSession verify path also repairs bare chats before handing over.
+    const n = seen.length;
+    assert.equal(await sessions.ensureHarnessSession("sess_repair1"), "ses_bare1");
+    assert.ok(seen.slice(n).some((l) => l.startsWith("POST /api/session/ses_bare1/agent")), "verify path repairs bare chat");
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: repairBareHarnessSession skips complete chats with zero writes", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-repair2-${Date.now()}.json`));
+  const seen = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      seen.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { id: "ses_full1", agent: "build", model: { id: "m", providerID: "p" } } }));
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_repair2", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port, status: "running", harnessSessionId: "ses_full1",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal(await sessions.repairBareHarnessSession("sess_repair2", null), true);
+    assert.ok(!seen.some((l) => l.startsWith("POST")), `complete chat must not be written: ${seen}`);
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: repair tolerates backend errors without throwing", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-repair3-${Date.now()}.json`));
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end("{}");
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_repair3", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port, status: "running", harnessSessionId: "ses_err1",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal(await sessions.repairBareHarnessSession("sess_repair3", null), false);
+    assert.equal(await sessions.repairBareHarnessSession("no-such-session", null), false);
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: repair retries lagging model/agent defaults (cold boot)", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-repair4-${Date.now()}.json`));
+  const seen = [];
+  let defaultHits = 0;
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push(`${req.method} ${req.url} ${body}`);
+        const j = (o) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
+        if (req.method === "GET" && req.url.startsWith("/api/session/ses_bare4")) return j({ data: { id: "ses_bare4" } });
+        if (req.method === "GET" && req.url.startsWith("/api/model/default")) {
+          defaultHits++;
+          if (defaultHits < 3) { res.writeHead(503, { "Content-Type": "application/json" }); res.end("{}"); return; }
+          return j({ data: { id: "mX", modelID: "mX", providerID: "provX" } });
+        }
+        if (req.method === "GET" && req.url === "/api/agent") return j({ data: [{ id: "build" }] });
+        if (req.method === "POST") return j({});
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end("{}");
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    const port = srv.address().port;
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_repair4", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port, status: "running", harnessSessionId: "ses_bare4",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    assert.equal(await sessions.repairBareHarnessSession("sess_repair4", null), true);
+    assert.equal(defaultHits, 3, `expected retries, got ${defaultHits}: ${seen}`);
+    assert.ok(seen.some((l) => l === `POST /api/session/ses_bare4/model {"model":{"id":"mX","providerID":"provX"}}`), `model posted after retry: ${seen}`);
+  } finally {
+    srv.close();
+  }
+});
+
+test("sessions: ensureSession heals dangling chassis hid (404 -> recreate)", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chaheal-${Date.now()}.json`));
+  sessions._resetSharedChassisForTest();
+  sessions._clearAliveForTest();
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const j = (code, o) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
+        if (req.method === "GET" && req.url === "/api/info") return j(200, { pid: 99999 });
+        if (req.method === "GET" && req.url === "/api/session/chagone") return j(404, {});
+        if (req.method === "GET" && req.url === "/api/session/chahid99") return j(200, { data: { id: "chahid99", title: "t", agent: "build", model: { id: "m" } } });
+        if (req.method === "POST" && req.url === "/api/session") return j(200, { data: { id: "chahid99" } });
+        return j(500, {});
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+  process.env.AI_MGR_CHASSIS_PORT = String(srv.address().port);
+  try {
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_chaheal1", workspaceId: ws.id, harness: "chassis", title: "t",
+      mode: "web", port: srv.address().port, status: "running", harnessSessionId: "chagone",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    const out = await sessions.ensureSession("sess_chaheal1");
+    assert.equal(out.harnessSessionId, "chahid99", "stale chassis hid must be recreated on ensure");
+    assert.equal(sessions.sessionById("sess_chaheal1").harnessSessionId, "chahid99");
+  } finally {
+    if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+    else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+    sessions._resetSharedChassisForTest();
+    sessions._clearAliveForTest();
+    srv.close();
+  }
+});
+
+test("sessions: ensureSession heals dangling opencode hid (404 -> recreate)", async () => {
+  const http = require("http");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-opheal-${Date.now()}.json`));
+  sessions._resetSharedForTest();
+  sessions._clearAliveForTest();
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        const j = (code, o) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(o)); };
+        if (req.method === "GET" && req.url === "/api/info") return j(200, { pid: 99999 });
+        if (req.method === "GET" && req.url === "/api/session/ses_gone") return j(404, {});
+        if (req.method === "GET" && req.url === "/api/session/ses_new1") return j(200, { data: { id: "ses_new1", agent: "build", model: { id: "m" } } });
+        if (req.method === "POST" && req.url === "/api/session") return j(200, { data: { id: "ses_new1" } });
+        return j(500, {});
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const prevShared = process.env.AI_MGR_SHARED_PORT;
+  process.env.AI_MGR_SHARED_PORT = String(srv.address().port);
+  try {
+    const ws = sessions.createWorkspace(os.tmpdir());
+    store.addSession({
+      id: "sess_opheal1", workspaceId: ws.id, harness: "opencode", title: "t",
+      mode: "web", port: srv.address().port, status: "running", harnessSessionId: "ses_gone",
+      createdAt: 1, lastActiveAt: 1,
+    });
+    const out = await sessions.ensureSession("sess_opheal1");
+    assert.equal(out.harnessSessionId, "ses_new1", "stale opencode hid must be recreated on ensure");
+  } finally {
+    if (prevShared === undefined) delete process.env.AI_MGR_SHARED_PORT;
+    else process.env.AI_MGR_SHARED_PORT = prevShared;
+    sessions._resetSharedForTest();
+    sessions._clearAliveForTest();
+    srv.close();
+  }
+});
+
+test("sessions: chassis backend calls carry the chassis Basic secret, not the opencode one", async () => {
+  const http = require("http");
+  const chassisAuth = require("../src/server/chassisAuth");
+  const opencodeAuth = require("../src/server/opencodeAuth");
+  store._resetForTest(path.join(os.tmpdir(), `aimgr-chaauth-${Date.now()}.json`));
+  sessions._resetSharedChassisForTest();
+  const prevPw = process.env.AI_MGR_CHASSIS_PASSWORD;
+  const prevOpw = process.env.AI_MGR_OPENCODE_PASSWORD;
+  process.env.AI_MGR_CHASSIS_PASSWORD = "chassis-test-secret";
+  process.env.AI_MGR_OPENCODE_PASSWORD = "opencode-test-secret";
+  chassisAuth._resetForTest();
+  opencodeAuth._resetForTest();
+  const seenAuth = [];
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seenAuth.push(req.headers.authorization || null);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        if (req.url === "/api/info") res.end(JSON.stringify({ pid: 424242 }));
+        else if (req.method === "POST" && req.url === "/api/session") res.end(JSON.stringify({ data: { id: "ses_auth1" } }));
+        else res.end(JSON.stringify({ data: { id: "ses_auth1", agent: "build", model: { id: "m" } } }));
+      });
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const prevChassis = process.env.AI_MGR_CHASSIS_PORT;
+  process.env.AI_MGR_CHASSIS_PORT = String(srv.address().port);
+  try {
+    const ws = sessions.createWorkspace(os.tmpdir());
+    await sessions.createSession(ws.id, "chassis", "authed");
+    assert.ok(seenAuth.length > 0, "backend received calls");
+    assert.ok(seenAuth.every((a) => a === chassisAuth.authHeader()), `all calls use chassis secret: ${seenAuth}`);
+    assert.ok(!seenAuth.includes(opencodeAuth.authHeader()), "opencode secret never sent to chassis port");
+  } finally {
+    if (prevChassis === undefined) delete process.env.AI_MGR_CHASSIS_PORT;
+    else process.env.AI_MGR_CHASSIS_PORT = prevChassis;
+    if (prevPw === undefined) delete process.env.AI_MGR_CHASSIS_PASSWORD;
+    else process.env.AI_MGR_CHASSIS_PASSWORD = prevPw;
+    if (prevOpw === undefined) delete process.env.AI_MGR_OPENCODE_PASSWORD;
+    else process.env.AI_MGR_OPENCODE_PASSWORD = prevOpw;
+    chassisAuth._resetForTest();
+    opencodeAuth._resetForTest();
+    sessions._resetSharedChassisForTest();
+    srv.close();
+  }
+});
+
+test("sessions: tryAdoptChassis rejects a 200 non-JSON occupant (retired lumina daemon)", async () => {
+  const http = require("http");
+  // Regression (2026-11-06): the retired lumina daemon serves its SPA shell
+  // with 200 for unknown paths — adopting it stranded every chassis create
+  // on HTML instead of the daemon API.
+  const srv = await new Promise((resolve) => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<!doctype html><html><body>lumina shell</body></html>");
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try {
+    assert.equal(await sessions.tryAdoptChassis(srv.address().port, 1000), false);
+  } finally {
     srv.close();
   }
 });

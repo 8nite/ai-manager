@@ -1,5 +1,5 @@
 // app.js — AI Manager Mission Control frontend logic
-// Coordinates multi-harness sessions (opencode web, dsh web, droid PTY),
+// Coordinates multi-harness sessions (opencode/chassis web, droid/agy PTY),
 // bottom consoles, quick switcher palette, and live dashboard metrics.
 
 const $ = (id) => document.getElementById(id);
@@ -61,12 +61,29 @@ async function refresh() {
     syncOpencodeTabs();
 
     // Prune panes whose session vanished (deleted workspace/session).
+    // Fall back to another session (even cross-workspace) so the pane keeps
+    // a live view and the web SPA stays warm (no re-init). The live
+    // frame is spared from the purge below so paintPane can retarget it via
+    // the client-nav lane.
     const live = new Set(state.sessions.map((x) => x.id));
     let panesChanged = false;
+    const sparedPanes = new Set();
     for (const p of state.panes) {
       if (p.sessionId && !live.has(p.sessionId)) {
+        if (p.pid && state.switchingIds.has(p.pid)) {
+          teardownPane(p);
+          p.sessionId = null;
+          panesChanged = true;
+          continue;
+        }
         teardownPane(p);
-        p.sessionId = null;
+        const fb = pickFallbackSession(null, null);
+        if (fb) {
+          p.sessionId = fb;
+          sparedPanes.add(p.pid);
+        } else {
+          p.sessionId = null;
+        }
         panesChanged = true;
       }
       // Drop cached documents for vanished sessions everywhere (the
@@ -74,6 +91,7 @@ async function refresh() {
       if (p._frameCache) {
         for (const sid of [...p._frameCache.keys()]) {
           if (!live.has(sid)) {
+            if (sparedPanes.has(p.pid)) continue;
             try { p._frameCache.get(sid).remove(); } catch {}
             p._frameCache.delete(sid);
           }
@@ -358,20 +376,40 @@ function updateWsGroup(group, ws, sess) {
       if (!confirm(`Remove workspace "${ws.name}" and delete its ${n} session(s)?`)) return;
       await api("DELETE", `/api/workspaces/${ws.id}`).catch(() => {});
       const gone = new Set(state.sessions.filter((s) => s.workspaceId === ws.id).map((s) => s.id));
+      const fallbackTargets = [];
       for (const p of state.panes) {
         if (p.sessionId && gone.has(p.sessionId)) {
           teardownPane(p);
-          p.sessionId = null;
+          const fb = pickFallbackSession(gone, null);
+          if (fb) {
+            // Cross-workspace fallback: keep a live view so the web SPA
+            // is reused via client nav, not re-inited from a blank pane.
+            p.sessionId = fb;
+            fallbackTargets.push([p, fb]);
+          } else {
+            p.sessionId = null;
+          }
         }
       }
+      // Start warm switches first: setPaneSession retargets the live frame
+      // synchronously, so the purge below no longer finds it under the old
+      // id and the SPA navigates instead of rebooting.
+      for (const [p, fb] of fallbackTargets) {
+        try { setPaneSession(p, fb); } catch {}
+      }
       for (const gid of gone) purgeSessionFrames(gid);
-      activateSeq++;
-      state.switchingIds.clear();
-      state.switchingId = null;
-      syncLegacyActive();
-      hideStageLoader();
-      renderPanes();
-      updateEmptyOverlay();
+      if (!fallbackTargets.length) {
+        activateSeq++;
+        state.switchingIds.clear();
+        state.switchingId = null;
+        syncLegacyActive();
+        hideStageLoader();
+        renderPanes();
+        updateEmptyOverlay();
+      } else {
+        syncLegacyActive();
+        updateEmptyOverlay();
+      }
       refresh();
     };
   }
@@ -445,21 +483,43 @@ function wireSessRow(li, id) {
   if (delSessBtn) delSessBtn.onclick = async (e) => {
     e.stopPropagation();
     // No confirm: removing a session from the panel is one click by design.
+    const cur = state.sessions.find((s) => s.id === id);
+    const preferWs = cur ? cur.workspaceId : null;
     await api("DELETE", `/api/sessions/${id}`).catch(() => {});
+    const gone = new Set([id]);
+    const fallbackTargets = [];
     for (const p of state.panes) {
-      if (p.sessionId === id || p.sessionId === state.switchingId) {
+      if (p.sessionId && gone.has(p.sessionId)) {
         teardownPane(p);
-        p.sessionId = null;
+        // Cross-workspace fallback (same workspace first, then any): keeps
+        // a live view so the web SPA is reused, not re-inited.
+        const fb = pickFallbackSession(gone, preferWs);
+        if (fb) {
+          p.sessionId = fb;
+          fallbackTargets.push([p, fb]);
+        } else {
+          p.sessionId = null;
+        }
       }
     }
+    // Warm switches first (synchronous retarget), then purge the deleted
+    // document everywhere else.
+    for (const [p, fb] of fallbackTargets) {
+      try { setPaneSession(p, fb); } catch {}
+    }
     purgeSessionFrames(id);
-    activateSeq++;
-    state.switchingIds.clear();
-    state.switchingId = null;
-    syncLegacyActive();
-    hideStageLoader();
-    renderPanes();
-    updateEmptyOverlay();
+    if (!fallbackTargets.length) {
+      activateSeq++;
+      state.switchingIds.clear();
+      state.switchingId = null;
+      syncLegacyActive();
+      hideStageLoader();
+      renderPanes();
+      updateEmptyOverlay();
+    } else {
+      syncLegacyActive();
+      updateEmptyOverlay();
+    }
     refresh();
   };
 
@@ -731,6 +791,30 @@ function purgeSessionFrames(id) {
   }
 }
 
+// Pick a fallback session when the visible one goes away (delete/close).
+// Cross-workspace by design: prefer the same workspace first so context
+// stays close, then any other workspace so the pane never goes blank while
+// sessions exist elsewhere. Keeps the web SPA warm: the caller reuses
+// the live frame via the client-nav lane instead of booting a new document
+// (no re-init). Newest-first (state.sessions is already sorted).
+function pickFallbackSession(excluded, preferWorkspaceId) {
+  const ex = excluded instanceof Set ? excluded : new Set(excluded ? [excluded] : []);
+  const remaining = (state.sessions || []).filter((s) => s && s.id && !ex.has(s.id));
+  if (!remaining.length) return null;
+  const shown = new Set((state.panes || []).map((p) => p && p.sessionId).filter(Boolean));
+  if (preferWorkspaceId) {
+    const sameUnshown = remaining.find((s) => s.workspaceId === preferWorkspaceId && !shown.has(s.id));
+    if (sameUnshown) return sameUnshown.id;
+  }
+  const anyUnshown = remaining.find((s) => !shown.has(s.id));
+  if (anyUnshown) return anyUnshown.id;
+  if (preferWorkspaceId) {
+    const sameAny = remaining.find((s) => s.workspaceId === preferWorkspaceId);
+    if (sameAny) return sameAny.id;
+  }
+  return remaining[0].id;
+}
+
 function attachFrameListeners(p, frame) {
   frame.addEventListener("focus", () => focusPane(p.pid));
   frame.addEventListener("load", () => {
@@ -752,13 +836,21 @@ function attachFrameListeners(p, frame) {
   });
 }
 
+function frameSrcFor(sess) {
+  // Opencode-family backends boot at the session root and the route shim
+  // deep-links them into the pre-created chat.
+  if (!sess) return null;
+  return `/s/${sess.id}/`;
+}
+
 function forceFrameReload(frame, sessionId) {
   // Always reload via the session-root prefix (/s/:id/) so the proxy
   // re-injects the route shim, web defaults, no-titlebar CSS, and api-scope:
   // after the SPA route shim rewrites location to /server/:key/session/:hid,
   // a bare location.reload() would hit fallbackMiddleware without shims.
   try {
-    frame.src = `/s/${sessionId}/`;
+    const s = state.sessions.find((x) => x.id === sessionId);
+    frame.src = frameSrcFor(s) || `/s/${sessionId}/`;
     return;
   } catch {}
   try {
@@ -1032,7 +1124,7 @@ function paintPane(p) {
         frame.dataset.sess = p.sessionId;
         attachFrameListeners(p, frame);
         body.appendChild(frame);
-        frame.src = `/s/${p.sessionId}/`;
+        frame.src = frameSrcFor(s) || `/s/${p.sessionId}/`;
         cache.set(p.sessionId, frame);
       }
     } else {
@@ -1073,18 +1165,21 @@ function isFrameCached(p, id) {
   return !!(f && f.isConnected);
 }
 
-// Sync manager opencode sessions into opencode web's window-tab store
-// (`opencode.window.browser.dat:tabs` + `tabs.info`).
+// Sync manager web sessions into each backend's window-tab store.
+// Opencode reads `opencode.window.browser.dat:tabs` (+ `tabs.info`);
+// chassis (a fork) reads the `chassis.*` equivalents. Same shape, same
+// server key (origin-derived) — only the localStorage namespace differs.
 //
-// Opencode web's titlebar (<AA> in index-*.js, mounted even when hidden via
-// CSS) pre-syncs `session.sync(id, {children:true})`, permissions, forms,
-// pending inbox, and ComposerState for every tab in `tabs`. Seeding all
-// manager opencode chats here means `m.session.info[id]` (incl.
+// The backend titlebar pre-syncs `session.sync(id, ...)`, permissions,
+// forms, pending inbox, and ComposerState for every tab in `tabs`. Seeding
+// all manager chats here means `m.session.info[id]` (incl.
 // `location.directory`) is already warm before a route switch — so
 // <Show when={directory}> in TargetSessionRouteContent never unmounts/reinits
 // the session view tree when switching sessions.
-const OC_TABS_KEY = "opencode.window.browser.dat:tabs";
-const OC_TABS_INFO_KEY = "opencode.window.browser.dat:tabs.info";
+const WEB_TAB_STORES = [
+  { harness: "opencode", tabs: "opencode.window.browser.dat:tabs", info: "opencode.window.browser.dat:tabs.info" },
+  { harness: "chassis", tabs: "chassis.window.browser.dat:tabs", info: "chassis.window.browser.dat:tabs.info" },
+];
 
 function syncOpencodeTabs() {
   try {
@@ -1092,13 +1187,21 @@ function syncOpencodeTabs() {
     const srv = location.origin;
     if (!key || !srv) return;
     const wsById = Object.fromEntries((state.workspaces || []).map((w) => [w.id, w]));
+    for (const store of WEB_TAB_STORES) {
+      syncWebTabsFor(store, wsById, srv, key);
+    }
+  } catch {}
+}
+
+function syncWebTabsFor(store, wsById, srv, key) {
+  try {
     const opSessions = (state.sessions || []).filter(
-      (s) => s && s.harness === "opencode" && s.mode === "web" && s.harnessSessionId
+      (s) => s && s.harness === store.harness && s.mode === "web" && s.harnessSessionId
     );
     if (!opSessions.length) return;
     let existing = [];
     try {
-      const raw = localStorage.getItem(OC_TABS_KEY);
+      const raw = localStorage.getItem(store.tabs);
       const parsed = raw ? JSON.parse(raw) : [];
       if (Array.isArray(parsed)) existing = parsed;
     } catch {}
@@ -1111,11 +1214,11 @@ function syncOpencodeTabs() {
       })),
       ...drafts,
     ];
-    localStorage.setItem(OC_TABS_KEY, JSON.stringify(tabs));
+    localStorage.setItem(store.tabs, JSON.stringify(tabs));
 
     let info = {};
     try {
-      const rawInfo = localStorage.getItem(OC_TABS_INFO_KEY);
+      const rawInfo = localStorage.getItem(store.info);
       const parsedInfo = rawInfo ? JSON.parse(rawInfo) : {};
       if (parsedInfo && typeof parsedInfo === "object" && !Array.isArray(parsedInfo)) info = parsedInfo;
     } catch {}
@@ -1136,19 +1239,19 @@ function syncOpencodeTabs() {
     for (const k of Object.keys(info)) {
       if (!liveKeys.has(k)) delete info[k];
     }
-    localStorage.setItem(OC_TABS_INFO_KEY, JSON.stringify(info));
+    localStorage.setItem(store.info, JSON.stringify(info));
   } catch {}
 }
 
 // Client-side web session switching: one live SPA per pane.
 //
-// The opencode SPA owns a client router (/server/:key/session/:id): pushing
-// it to another chat swaps the view with data fetches only — no document
-// reload, no bundle re-parse, no new SSE stream. The manager therefore keeps
-// ONE live web frame per pane and navigates it on same-backend switches
-// (always true while all opencode sessions share one backend port); anything
-// else (unreadable frame, missing chat binding, backend mismatch, unverified
-// nav) falls back to the full document load.
+// Opencode-family SPAs own a client router (/server/:key/session/:id):
+// pushing it to another chat swaps the view with data fetches only — no
+// document reload, no bundle re-parse, no new SSE stream. The manager
+// therefore keeps ONE live web frame per pane and navigates it on
+// same-backend switches (always true while same-harness sessions share one
+// backend port); anything else (unreadable frame, missing chat binding,
+// backend mismatch, unverified nav) falls back to the full document load.
 function frameSessionPort(pane, frame) {
   try {
     const sid = frame && frame.dataset && frame.dataset.sess;
@@ -1174,10 +1277,19 @@ function visibleWebFrame(pane) {
 }
 
 function clientSwitchFrame(pane, target) {
-  if (!target || target.mode !== "web" || !target.port) return null;
+  // Opencode-family only: these SPAs own a client router the manager can
+  // push to another chat without a document reload. Cross-harness or
+  // cross-backend switches take the full cached-frame path.
+  if (!target || target.mode !== "web" || !target.port ||
+      (target.harness !== "opencode" && target.harness !== "chassis")) return null;
   const f = visibleWebFrame(pane);
   if (!f) return null;
-  if (frameSessionPort(pane, f) !== target.port) return null; // cross-backend: full load
+  // Same-harness + same-port only: an opencode frame must never be pushed to
+  // a chassis chat (different backend store) and vice versa.
+  const shown = frameSessionPort(pane, f);
+  if (shown !== target.port) return null; // cross-backend: full load
+  const shownRec = (state.sessions || []).find((x) => x.id === (f.dataset && f.dataset.sess));
+  if (shownRec && shownRec.harness !== target.harness) return null;
   return f;
 }
 
@@ -1187,10 +1299,10 @@ function opencodeServerKey() {
   } catch { return null; }
 }
 
-// True when the live opencode SPA in `w` has settled on `hid`: either a fresh
-// backend fetch for `hid` arrived (cold chat) OR opencode's reactive Tabs +
+// True when the live web SPA in `w` has settled on `hid`: either a fresh
+// backend fetch for `hid` arrived (cold chat) OR the backend's reactive Tabs +
 // Router marked `hid` active with the session chat mounted (warm switch-back
-// or SSE-created chat where opencode's one-shot message store makes zero
+// or SSE-created chat where the backend's one-shot message store makes zero
 // repeat network requests).
 function isSpaRoutedTo(w, hid, seenMsg, seenSess) {
   try {
@@ -1241,7 +1353,7 @@ async function clientSwitchSession(frame, hid, timeoutMs) {
     const seen = countRes(msgUrl, false);
     const seenSess = countRes(sessUrl, true);
     const targetPath = `/server/${key}/session/${hid}`;
-    // Prefer opencode's native tab-select handler when the tab link is
+    // Prefer the backend's native tab-select handler when the tab link is
     // already mounted (updates Tabs.recent + Solid Router in one batch);
     // always ensure location + popstate converge onto targetPath.
     try {
@@ -1947,7 +2059,7 @@ async function quickCreateSession(workspaceId) {
 // Single source of truth for the harness quick-create uses. Persists to
 // localStorage so reloads keep the pick.
 const HARNESS_KEY = "ai-manager.harness";
-const HARNESS_NAMES = ["opencode", "droid", "dsh", "agy"];
+const HARNESS_NAMES = ["opencode", "droid", "chassis", "agy"];
 
 function getSelectedHarness() {
   try {
@@ -3078,12 +3190,15 @@ window.addEventListener("resize", () => {
   try {
     await refresh();
     // Re-attach surviving pane sessions after state loads (prunes dead ids).
+    // Dead ids fall back to another session (even cross-workspace) so a
+    // stale persisted pane never boots blank while sessions exist.
     for (const p of state.panes) {
       if (p.sessionId && state.sessions.find((x) => x.id === p.sessionId)) {
         paintPane(p);
       } else if (p.sessionId) {
         teardownPane(p);
-        p.sessionId = null;
+        const fb = pickFallbackSession(null, null);
+        p.sessionId = fb;
       }
     }
     syncLegacyActive();

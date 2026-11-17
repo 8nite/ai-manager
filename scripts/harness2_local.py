@@ -62,7 +62,9 @@ def build_base_tree() -> harness_tree.Tree:
     )
     try:
         perms = json.loads((OC_HOME / "opencode.json").read_text(encoding="utf-8"))["permission"]
-        deny = sorted(r for scope in perms.values() for r, v in scope.items() if v == "deny")
+        # Read-scope only: edit-scope denies (e.g. read-only tooling docs)
+        # are not read denies, and bare "*" is not a file pattern.
+        deny = sorted(r for r, v in perms.get("read", {}).items() if v == "deny" and r != "*")
     except (OSError, ValueError, KeyError, AttributeError):
         deny = []
     tree["guardrails.md"] = (
@@ -135,7 +137,10 @@ PROMPT_TMPL = """=== TASK ===
    described situation matches (see AGENTS.md index).
 3. Only save the final deliverables to the output directory below. Do not save
    any intermediate or temporary files, and do not print secrets.
-4. If data looks ambiguous, state the assumption in the deliverable and continue.
+4. Stay inside this workspace: never read or write outside it except /tmp
+   scratch (allowed). Delete every scratch file you create under /tmp before
+   finishing; only deliverables in the output directory survive.
+5. If data looks ambiguous, state the assumption in the deliverable and continue.
 
 === OUTPUT DIRECTORY ===
 {output}
@@ -218,6 +223,9 @@ class LocalAdapter:
         run_dir = self.spec.runs_root / "executions" / run_id.replace("/", "__")
         run_dir.mkdir(parents=True, exist_ok=True)
         ws = Path(tempfile.mkdtemp(prefix="h2local-"))
+        # Per-run TMPDIR under /tmp (allowed by the fence below); removed in
+        # finally alongside the workspace so no scratch survives the session.
+        tmpdir = Path(tempfile.mkdtemp(prefix="h2tmp-" + re.sub(r"[^A-Za-z0-9_-]", "_", run_id)[:40] + "-"))
         try:
             src = harness_dir or self._base_dir
             tree = harness_tree.read_tree(self.substrate.surface(), src)
@@ -241,8 +249,10 @@ class LocalAdapter:
             env = dict(os.environ)
             env["PWD"] = str(ws)  # opencode v2 resolves its workspace from $PWD, not getcwd()
             env["OPENCODE_PERMISSION"] = json.dumps(
-                {"external_directory": {"*": "deny", str(ws): "allow", f"{ws}/**": "allow"}}
+                {"external_directory": {"*": "deny", str(ws): "allow", f"{ws}/**": "allow",
+                                         "/tmp": "allow", "/tmp/**": "allow"}}
             )
+            env["TMPDIR"] = str(tmpdir)
             with open(run_dir / "stdout.jsonl", "w", encoding="utf-8") as fh:
                 proc = subprocess.run(cmd, cwd=ws, env=env, stdout=fh,
                                       stderr=subprocess.DEVNULL, timeout=timeout or 1200)
@@ -253,6 +263,7 @@ class LocalAdapter:
             if any(out.iterdir()):
                 shutil.copytree(out, run_dir / "output", dirs_exist_ok=True)
         finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
             shutil.rmtree(ws, ignore_errors=True)
         return run_dir
 

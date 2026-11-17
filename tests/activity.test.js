@@ -12,6 +12,16 @@ test("activity: web sessions mirror process status", () => {
   assert.equal(sessions.activityFor({ mode: "web", status: "exited" }).activity, "finished");
 });
 
+test("activity: chassis shares the opencode-family snapshot matrix (working/waiting/running)", () => {
+  // Chassis speaks the opencode API, so attention uses the same snapshot
+  // rules (no harness-specific export parsing).
+  assert.equal(sessions.webActivityFromSnapshot(
+    { isActive: false, hasMessages: false, latest: null }, NOW).activity, "running");
+  assert.equal(sessions.webActivityFromSnapshot(
+    { isActive: true, hasMessages: true, latest: { type: "assistant", time: { created: NOW - 1000 } } }, NOW).activity,
+    "working");
+});
+
 test("activity: pty working while output is fresh", () => {
   const a = sessions.activityFor(
     { mode: "pty" }, { exited: false, lastOutputAt: NOW - 2000 }, NOW);

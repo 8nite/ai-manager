@@ -10,6 +10,8 @@
 #   2. fresh browser state gets queue + dark seeded and the app boots dark;
 #   3. explicit user choices (steer/light) survive reload untouched;
 #   4. titlebar hidden, app functional.
+#   5. scoped SSE (/s/:id/api/event) streams instead of buffering forever;
+#   6. pre-created backend chat carries agent+model (model-bar regression).
 #
 # Deliberately does NOT send a prompt: that would run a billed agent turn.
 # The proxy delivery rewrite is covered by stub-level tests
@@ -41,6 +43,10 @@ port_free "$HARNESS_BASE" || { echo "FAIL: port $HARNESS_BASE in use (set HARNES
 # sharedPort); it must be free too, else the scratch backend can't bind.
 SHARED_PORT="$((HARNESS_BASE - 10))"
 port_free "$SHARED_PORT" || { echo "FAIL: port $SHARED_PORT in use (shared opencode backend; set HARNESS_BASE=)"; exit 2; }
+# Shared chassis backend defaults to HARNESS_BASE-11 (see sessions.js
+# chassisPort); same free-port requirement.
+CHASSIS_PORT="$((HARNESS_BASE - 11))"
+port_free "$CHASSIS_PORT" || { echo "FAIL: port $CHASSIS_PORT in use (shared chassis backend; set HARNESS_BASE=)"; exit 2; }
 
 TMP="$(mktemp -d /tmp/aimgr-e2e.XXXXXX)"
 WS="$TMP/ws"; mkdir -p "$WS" "$TMP/data"
@@ -49,7 +55,7 @@ WS="$TMP/ws"; mkdir -p "$WS" "$TMP/data"
 # flakes unrelated sections). A per-run profile keeps e2e hermetic and is
 # removed with $TMP by the EXIT trap.
 export AGENT_BROWSER_PROFILE="$TMP/browser-profile"
-MGR_PID=""; SESS=""; FAILS=0
+MGR_PID=""; SESS=""; SESS_CHA=""; SESS_CHA2=""; FAILS=0
 
 T0_E2E=$(date +%s)
 tstamp() { echo "$(( $(date +%s) - T0_E2E ))s"; }
@@ -119,6 +125,12 @@ EOF
 }
 
 cleanup() {
+  if [ -n "${SESS_CHA2:-}" ]; then
+    curl -s -m 10 -X DELETE "$MGR/api/sessions/$SESS_CHA2" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${SESS_CHA:-}" ]; then
+    curl -s -m 10 -X DELETE "$MGR/api/sessions/$SESS_CHA" >/dev/null 2>&1 || true
+  fi
   if [ -n "${SESS_FB:-}" ]; then
     curl -s -m 10 -X DELETE "$MGR/api/sessions/$SESS_FB" >/dev/null 2>&1 || true
   fi
@@ -160,6 +172,25 @@ done
 curl -s -m 5 "$MGR/health" >/dev/null || { fail "scratch manager never came up (see $TMP/manager.log)"; exit 1; }
 pass "scratch manager up"
 
+echo "== headroom: opencode backends route LLM calls via the local proxy"
+# Pure env-shape check (no prompt is ever sent, so no LLM traffic flows):
+# the spawned `opencode serve` must inherit OPENCODE_CONFIG_CONTENT carrying
+# the headroom provider + native anthropic/openai baseURL overrides.
+AI_MGR_OPENCODE_PASSWORD_FILE="$TMP/data/opencode-password" \
+AI_MGR_HARNESS_BASE_PORT="$HARNESS_BASE" \
+node -e '
+const { getHarness } = require("./src/server/backends");
+const env = getHarness("opencode").env();
+const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT || "null");
+if (!cfg || !cfg.provider || !cfg.provider.headroom) throw new Error("no headroom provider in OPENCODE_CONFIG_CONTENT");
+for (const p of ["anthropic", "openai"]) {
+  const u = cfg.provider[p] && cfg.provider[p].options && cfg.provider[p].options.baseURL;
+  if (!/^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(u || "")) throw new Error(p + " baseURL wrong: " + u);
+}
+console.log("headroom routing ok");
+' > "$TMP/headroom-check.log" 2>&1 \
+  && pass "opencode serve env carries headroom proxy routing" || { fail "opencode serve env missing headroom routing"; cat "$TMP/headroom-check.log"; }
+
 WSID="$(curl -s -m 10 -X POST "$MGR/api/workspaces" -H 'Content-Type: application/json' \
   -d "{\"path\":\"$WS\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 echo "== create opencode session (backend boot can take ~60s)"
@@ -172,6 +203,34 @@ ss=json.load(sys.stdin)['sessions']
 print(next(s['status'] for s in ss if s['id']=='$SESS'))")"
 [ "$STATUS" = "running" ] || { fail "session status=$STATUS (want running)"; tail -5 "$TMP/manager.log"; exit 1; }
 pass "session running ($SESS)"
+
+echo "== api: pre-created backend chat carries agent+model (model-bar regression)"
+# The manager pre-creates the opencode chat via POST /api/session (no
+# agent/model), and opencode only sometimes defaults them itself — a bare
+# chat renders a composer with no model bar (verified live 2026-10-31).
+# ensureHarnessSession repairs from the backend's own defaults before the
+# create call returns, so assert the bound chat is already complete here.
+HID_E2E="$(curl -s -m 10 "$MGR/api/state" | python3 -c "
+import json,sys
+ss = json.load(sys.stdin)['sessions']
+print(next((s.get('harnessSessionId') or '' for s in ss if s['id'] == '$SESS'), ''))")"
+[ -n "$HID_E2E" ] || fail "no backend chat bound for $SESS"
+# Cold scratch backends resolve model/agent defaults a few seconds after
+# the port opens (provider init lags) while repair retries briefly — poll
+# a little before calling it bare.
+REPAIRED=""
+for _ in $(seq 1 5); do
+  CHAT_E2E="$(curl -s -m 10 "$MGR/s/$SESS/api/session/$HID_E2E" || echo '{}')"
+  echo "$CHAT_E2E" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)['data']
+assert d.get('agent'), 'no agent'
+assert (d.get('model') or {}).get('id'), 'no model'
+" 2>/dev/null && { REPAIRED=1; break; }
+  sleep 5
+done
+[ -n "$REPAIRED" ] \
+  && pass "backend chat has agent+model ($HID_E2E)" || fail "bare backend chat (no model bar): $HID_E2E"
 
 URL="$MGR/s/$SESS/"
 echo "== served HTML + CSP"
@@ -229,6 +288,22 @@ echo "$CFG_HIT" | grep -qi "HIT" \
 CFG_CC="$(curl -s -m 20 -D - -o /dev/null "$MGR/s/$SESS/api/config" | tr -d '\r' | grep -i '^cache-control:' || true)"
 echo "$CFG_CC" | grep -q "private, max-age=" \
   && pass "config GET browser-cacheable ($CFG_CC)" || fail "config not browser-cacheable: $CFG_CC"
+
+echo "== api: scoped SSE streams instead of buffering forever"
+# Regression (2026-10-31): the scoped inject path buffered the whole upstream
+# body and replied only on upstream end — an infinite SSE never ends, so the
+# request hung with zero bytes (headers included). Headers + first events must
+# arrive promptly; opencode emits server.connected immediately on subscribe.
+SSE_HDR="$TMP/sse.hdr"; SSE_BODY="$TMP/sse.body"
+timeout 25 curl -s -m 18 -D "$SSE_HDR" -o "$SSE_BODY" "$MGR/s/$SESS/api/event" >/dev/null 2>&1 || true
+SSE_HDR0="$(head -c 160 "$SSE_HDR" 2>/dev/null || echo MISSING-HDR)"
+SSE_CT="$(grep -i '^content-type:' "$SSE_HDR" 2>/dev/null | tr -d '\r' || echo MISSING-CT)"
+grep -q "^HTTP/[0-9.]* 200" "$SSE_HDR" 2>/dev/null \
+  && pass "scoped SSE answers 200 promptly" || fail "scoped SSE no 200 headers: $SSE_HDR0"
+echo "$SSE_CT" | grep -qi "text/event-stream" \
+  && pass "scoped SSE is event-stream" || fail "scoped SSE wrong content-type: $SSE_CT"
+grep -q "data:" "$SSE_BODY" 2>/dev/null \
+  && pass "scoped SSE delivers events" || fail "scoped SSE zero events (buffered forever?)"
 
 echo "== browser: fresh state gets defaults"
 agent-browser open "$URL" >/dev/null 2>&1 || true
@@ -872,7 +947,7 @@ EOF
 SWITCH="$(echo "$SWITCH_RAW" | python3 -c 'import json,sys; print(json.load(sys.stdin))' 2>/dev/null || echo "EVAL-ERR")"
 echo "$SWITCH" | grep -q '"inTopRight":true' \
   && pass "switch sits top-right" || fail "switch not top-right: $SWITCH"
-for h in opencode droid dsh agy; do
+for h in opencode droid chassis agy; do
   echo "$SWITCH" | grep -q "$h" \
     && pass "switch offers $h" || fail "switch missing $h: $SWITCH"
 done
@@ -1495,6 +1570,77 @@ echo "$AGY_STREAM" | grep -qa -i "antigravity" \
   && pass "agy PTY streams its banner" || fail "agy banner missing from stream"
 curl -s -m 10 -X DELETE "$MGR/api/sessions/$SESS_AGY" >/dev/null 2>&1 || true
 SESS_AGY=""
+
+echo "== api: chassis session boots the shared web backend (no prompt sent)"
+# Real chassis binary through the manager stack: create (shared daemon adopt
+# or spawn + chat pre-create, no billed turn), assert web mode + running +
+# bound chat, then read the session root through the proxy and expect the
+# chassis shell with route shim + chassis defaults seed + per-pane api scope.
+SESS_CHA=""
+SESS_CHA="$(curl -s -m 180 -X POST "$MGR/api/sessions" -H 'Content-Type: application/json' \
+  -d "{\"workspaceId\":\"$WSID\",\"harness\":\"chassis\",\"title\":\"e2e-chassis\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+CHA_STATE="$(curl -s -m 10 "$MGR/api/state" | python3 -c "
+import json,sys
+ss=json.load(sys.stdin)['sessions']
+s=next((x for x in ss if x['id']=='$SESS_CHA'),{})
+print(s.get('harness','?'), s.get('mode','?'), s.get('status','?'), s.get('harnessSessionId','') or 'nohid', s.get('port',''))")"
+echo "$CHA_STATE" | grep -q "^chassis web running" \
+  && pass "chassis session running in web mode ($CHA_STATE)" || fail "chassis state wrong: $CHA_STATE"
+echo "$CHA_STATE" | grep -qv "nohid" \
+  && pass "chassis chat pre-created + bound" || fail "chassis chat unbound: $CHA_STATE"
+CHA_HID="$(echo "$CHA_STATE" | awk '{print $4}')"
+CHA_PORT="$(echo "$CHA_STATE" | awk '{print $5}')"
+[ "$CHASSIS_PORT" = "$CHA_PORT" ] \
+  && pass "chassis lands on the shared daemon port ($CHASSIS_PORT)" || fail "chassis port wrong: $CHA_STATE (want $CHASSIS_PORT)"
+CHA_HTML="$(curl -s -m 20 "$MGR/s/$SESS_CHA/")"
+echo "$CHA_HTML" | grep -q "chassis-color-scheme" \
+  && pass "proxy serves the chassis shell" || fail "chassis shell missing"
+echo "$CHA_HTML" | grep -q "aimgr-api-scope" \
+  && pass "chassis shell carries api scope" || fail "chassis shell missing api scope"
+echo "$CHA_HTML" | grep -q "aimgr-route-shim" \
+  && pass "chassis shell carries route shim" || fail "route shim missing from chassis shell"
+echo "$CHA_HTML" | grep -q "chassis.global.dat" \
+  && pass "chassis shell carries chassis defaults seed" || fail "chassis defaults seed missing"
+# Manager rename writes through to the chassis chat (/api/session path).
+curl -s -m 10 -o /dev/null -X PATCH "$MGR/api/sessions/$SESS_CHA" -H 'Content-Type: application/json' -d '{"title":"e2e-chassis-renamed"}'
+sleep 2
+CHA_PWF="${AI_MGR_CHASSIS_PASSWORD_FILE:-$HOME/.ai-manager/chassis-password}"
+CHA_PW="$(cat "$CHA_PWF" 2>/dev/null || true)"
+CHA_BACKEND_TITLE="$(curl -s -m 10 -u "chassis:$CHA_PW" "http://127.0.0.1:$CHA_PORT/api/session/$CHA_HID" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("data",{}).get("title",""))' 2>/dev/null || true)"
+[ "$CHA_BACKEND_TITLE" = "e2e-chassis-renamed" ] \
+  && pass "rename wrote through to chassis chat" || fail "chassis backend title stuck at: $CHA_BACKEND_TITLE"
+# Simulate the chassis title agent with an out-of-band backend rename (no
+# billed turn — same pattern as the opencode title test above); the next
+# /api/state poll must converge the manager copy.
+curl -s -m 10 -o /dev/null -u "chassis:$CHA_PW" -X PATCH "http://127.0.0.1:$CHA_PORT/api/session/$CHA_HID" -H 'Content-Type: application/json' -d '{"title":"e2e-chassis-auto"}'
+CHA_DERIVED="none yet"
+for _ in $(seq 1 15); do
+  sleep 2
+  CHA_DERIVED="$(curl -s -m 10 "$MGR/api/state" | python3 -c "
+import json,sys
+ss=json.load(sys.stdin)['sessions']
+print(next((s.get('title','') for s in ss if s.get('id')=='$SESS_CHA'),''))")"
+  [ "$CHA_DERIVED" = "e2e-chassis-auto" ] && break
+done
+[ "$CHA_DERIVED" = "e2e-chassis-auto" ] \
+  && pass "chassis auto-title converges from backend" || fail "chassis auto-title stuck at: $CHA_DERIVED"
+# A second chassis session shares the daemon port (no per-session backend).
+SESS_CHA2="$(curl -s -m 180 -X POST "$MGR/api/sessions" -H 'Content-Type: application/json' \
+  -d "{\"workspaceId\":\"$WSID\",\"harness\":\"chassis\",\"title\":\"e2e-chassis-2\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+CHA_PORT2="$(curl -s -m 10 "$MGR/api/state" | python3 -c "
+import json,sys
+ss=json.load(sys.stdin)['sessions']
+print(next((str(s.get('port')) for s in ss if s['id']=='$SESS_CHA2'),'MISSING'))")"
+[ "$CHA_PORT2" = "$CHASSIS_PORT" ] \
+  && pass "second chassis session shares the daemon port" || fail "second chassis on $CHA_PORT2, want $CHASSIS_PORT"
+# Reconnect: ensure on a healthy chassis session keeps the same bound chat
+# (stale hids — backend store wiped — must heal to a live chat via 404→recreate,
+# covered in unit; here the live path must not churn the binding).
+CHA_RECONNECT_HID="$(curl -s -m 30 -X POST "$MGR/api/sessions/$SESS_CHA/ensure" -H 'Content-Type: application/json' -d '{}' | python3 -c 'import json,sys; print(json.load(sys.stdin).get("harnessSessionId",""))')"
+[ "$CHA_RECONNECT_HID" = "$CHA_HID" ] \
+  && pass "chassis ensure reconnect keeps the bound chat" || fail "chassis reconnect churned hid: $CHA_HID -> $CHA_RECONNECT_HID"
+curl -s -m 10 -X DELETE "$MGR/api/sessions/$SESS_CHA2" >/dev/null 2>&1 || true
+SESS_CHA2=""
 
 echo "== browser: attention shelf card owns a dismiss × (hide without delete)"
 # A quiet PTY session reads as waiting (no output past the 8s window), so an
